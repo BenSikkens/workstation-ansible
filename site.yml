@@ -20,4 +20,6 @@
     - vim
     - vscodium
     - keepassxc
+    - mkcert
     - forgejo
+    - obsidian

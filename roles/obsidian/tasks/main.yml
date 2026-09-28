@@ -1,0 +1,107 @@
+---
+# Runs Obsidian as a rootless Podman container under a dedicated 'obsidian'
+# user, managed as a systemd user service via Podman Quadlet.
+#
+# Obsidian is a native desktop GUI app with no official container image, so
+# there's no clean way to run it rootlessly without either forwarding the
+# host's X11/Wayland socket into the container (breaks the isolation this
+# is meant to provide) or using a "web desktop" image instead. This role
+# uses linuxserver.io's Obsidian image, which serves a full desktop
+# (via KasmVNC) over the browser at http(s)://localhost:<port> — no host
+# display integration needed, and it stays fully rootless.
+
+- name: Install podman and rootless container dependencies
+  ansible.builtin.dnf:
+    name:
+      - podman
+      - slirp4netns
+      - passt
+      - fuse-overlayfs
+    state: present
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Create the {{ obsidian_user }} user
+  ansible.builtin.user:
+    name: "{{ obsidian_user }}"
+    system: false
+    shell: /bin/bash
+    create_home: true
+    state: present
+
+- name: Enable systemd lingering for {{ obsidian_user }} (allows user services to run without an active login)
+  ansible.builtin.command: "loginctl enable-linger {{ obsidian_user }}"
+  args:
+    creates: "/var/lib/systemd/linger/{{ obsidian_user }}"
+
+- name: Look up {{ obsidian_user }} uid
+  ansible.builtin.command: "id -u {{ obsidian_user }}"
+  register: obsidian_uid
+  changed_when: false
+
+- name: Look up {{ obsidian_user }} gid
+  ansible.builtin.command: "id -g {{ obsidian_user }}"
+  register: obsidian_gid
+  changed_when: false
+
+- name: Ensure {{ obsidian_user }}'s systemd user manager is running
+  ansible.builtin.systemd:
+    name: "user@{{ obsidian_uid.stdout }}.service"
+    state: started
+
+- name: Create Obsidian config/data directory
+  ansible.builtin.file:
+    path: "{{ obsidian_data_dir }}/config"
+    state: directory
+    owner: "{{ obsidian_user }}"
+    group: "{{ obsidian_user }}"
+    mode: "0750"
+    recurse: true
+
+- name: Create Quadlet directory for {{ obsidian_user }}
+  ansible.builtin.file:
+    path: "/home/{{ obsidian_user }}/.config/containers/systemd"
+    state: directory
+    owner: "{{ obsidian_user }}"
+    group: "{{ obsidian_user }}"
+    mode: "0755"
+    recurse: true
+
+- name: Deploy Obsidian Quadlet unit
+  ansible.builtin.template:
+    src: obsidian.container.j2
+    dest: "/home/{{ obsidian_user }}/.config/containers/systemd/obsidian.container"
+    owner: "{{ obsidian_user }}"
+    group: "{{ obsidian_user }}"
+    mode: "0644"
+  register: obsidian_quadlet
+
+- name: Open firewall ports for Obsidian (http + https)
+  ansible.posix.firewalld:
+    port: "{{ item }}/tcp"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop:
+    - "{{ obsidian_http_port }}"
+    - "{{ obsidian_https_port }}"
+
+- name: Reload systemd user daemon for {{ obsidian_user }} (picks up new Quadlet unit)
+  ansible.builtin.systemd:
+    daemon_reload: true
+    scope: user
+  become: true
+  become_user: "{{ obsidian_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ obsidian_uid.stdout }}"
+  when: obsidian_quadlet.changed
+
+- name: Enable and start the Obsidian service
+  ansible.builtin.systemd:
+    name: obsidian.service
+    scope: user
+    state: started
+    enabled: true
+  become: true
+  become_user: "{{ obsidian_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ obsidian_uid.stdout }}"

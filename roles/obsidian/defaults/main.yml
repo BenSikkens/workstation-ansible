@@ -1,0 +1,7 @@
+---
+obsidian_user: obsidian
+obsidian_image: "lscr.io/linuxserver/obsidian:latest"
+obsidian_data_dir: "/home/{{ obsidian_user }}/obsidian-data"
+obsidian_http_port: 8484
+obsidian_https_port: 8485
+obsidian_timezone: "Etc/UTC"

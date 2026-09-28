@@ -1,0 +1,22 @@
+[Unit]
+Description=Forgejo Actions runner (rootless)
+After=network-online.target forgejo.service
+Wants=network-online.target
+Requires=forgejo.service
+
+[Container]
+Image={{ forgejo_runner_image }}
+ContainerName=forgejo-runner
+AutoUpdate=registry
+Network={{ forgejo_network_name }}.network
+Volume={{ forgejo_runner_data_dir }}:/data:Z
+Volume=%t/podman/podman.sock:/var/run/docker.sock
+Environment=DOCKER_HOST=unix:///var/run/docker.sock
+Exec=forgejo-runner daemon --config /data/config.yml
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

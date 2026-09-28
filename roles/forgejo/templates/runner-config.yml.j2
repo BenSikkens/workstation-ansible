@@ -1,0 +1,18 @@
+# Minimal Forgejo Actions runner config. Only the fields this role needs to
+# set are listed here — every field forgejo-runner supports has a built-in
+# default when omitted (cache, container, host tuning, etc.); see
+# https://forgejo.org/docs/latest/admin/actions/configuration/ to add more.
+
+runner:
+  name: "{{ forgejo_runner_name }}"
+  labels:
+{% for label in forgejo_runner_labels %}
+    - "{{ label }}"
+{% endfor %}
+
+server:
+  connections:
+    forgejo:
+      url: "{{ forgejo_runner_instance_url }}"
+      uuid: "{{ forgejo_runner_uuid }}"
+      token: "{{ forgejo_runner_secret }}"

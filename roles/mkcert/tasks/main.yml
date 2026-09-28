@@ -1,0 +1,8 @@
+---
+# mkcert is packaged directly in Fedora's official repos.
+
+- name: Install mkcert (RedHat family)
+  ansible.builtin.dnf:
+    name: mkcert
+    state: present
+  when: ansible_facts['os_family'] == "RedHat"

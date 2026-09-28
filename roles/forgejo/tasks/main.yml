@@ -40,9 +40,29 @@
     name: "user@{{ forgejo_uid.stdout }}.service"
     state: started
 
+- name: Enable rootless Podman socket for {{ forgejo_user }} (needed by the Actions runner's docker-executor labels)
+  ansible.builtin.systemd:
+    name: podman.socket
+    scope: user
+    state: started
+    enabled: true
+  become: true
+  become_user: "{{ forgejo_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ forgejo_uid.stdout }}"
+
 - name: Create Forgejo data directory
   ansible.builtin.file:
     path: "{{ forgejo_data_dir }}/data"
+    state: directory
+    owner: "{{ forgejo_user }}"
+    group: "{{ forgejo_user }}"
+    mode: "0750"
+    recurse: true
+
+- name: Create Forgejo runner data directory
+  ansible.builtin.file:
+    path: "{{ forgejo_runner_data_dir }}"
     state: directory
     owner: "{{ forgejo_user }}"
     group: "{{ forgejo_user }}"
@@ -57,6 +77,15 @@
     group: "{{ forgejo_user }}"
     mode: "0755"
     recurse: true
+
+- name: Deploy shared Podman network Quadlet unit (forgejo <-> forgejo-runner)
+  ansible.builtin.template:
+    src: forgejo.network.j2
+    dest: "/home/{{ forgejo_user }}/.config/containers/systemd/{{ forgejo_network_name }}.network"
+    owner: "{{ forgejo_user }}"
+    group: "{{ forgejo_user }}"
+    mode: "0644"
+  register: forgejo_network_quadlet
 
 - name: Deploy Forgejo Quadlet unit
   ansible.builtin.template:
@@ -77,7 +106,7 @@
     - "{{ forgejo_http_port }}"
     - "{{ forgejo_ssh_port }}"
 
-- name: Reload systemd user daemon for {{ forgejo_user }} (picks up new Quadlet unit)
+- name: Reload systemd user daemon for {{ forgejo_user }} (picks up new network/container Quadlet units)
   ansible.builtin.systemd:
     daemon_reload: true
     scope: user
@@ -85,11 +114,106 @@
   become_user: "{{ forgejo_user }}"
   environment:
     XDG_RUNTIME_DIR: "/run/user/{{ forgejo_uid.stdout }}"
-  when: forgejo_quadlet.changed
+  when: forgejo_network_quadlet.changed or forgejo_quadlet.changed
 
 - name: Enable and start the Forgejo service
   ansible.builtin.systemd:
     name: forgejo.service
+    scope: user
+    state: started
+    enabled: true
+  become: true
+  become_user: "{{ forgejo_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ forgejo_uid.stdout }}"
+
+# --- Forgejo Actions runner -------------------------------------------------
+# Registered via Forgejo's "offline registration" CLI flow (forgejo-cli
+# actions register --secret), which is meant for scripted setups like this
+# one: we generate our own secret, hand it to Forgejo via `podman exec`, and
+# get back a UUID to pair with it. No web-UI click-through needed, and no
+# separate `forgejo-runner register` step — writing the pair into
+# config.yml is itself the registration.
+# Docs: https://forgejo.org/docs/latest/admin/actions/registration/
+
+- name: Check whether the Forgejo Actions runner is already registered
+  ansible.builtin.stat:
+    path: "{{ forgejo_runner_data_dir }}/config.yml"
+  register: forgejo_runner_config_stat
+
+- name: Wait for Forgejo's API to be ready (needed before we can register the runner)
+  ansible.builtin.uri:
+    url: "http://localhost:{{ forgejo_http_port }}/api/healthz"
+    status_code: 200
+  register: forgejo_healthz
+  until: forgejo_healthz.status == 200
+  retries: 24
+  delay: 5
+  when: not forgejo_runner_config_stat.stat.exists
+
+- name: Generate a random runner registration secret (idempotent, kept on disk)
+  ansible.builtin.shell: "umask 077 && openssl rand -hex 20 > {{ forgejo_runner_data_dir }}/.runner-secret"
+  args:
+    creates: "{{ forgejo_runner_data_dir }}/.runner-secret"
+  become: true
+  become_user: "{{ forgejo_user }}"
+  when: not forgejo_runner_config_stat.stat.exists
+
+- name: Read the runner registration secret back
+  ansible.builtin.slurp:
+    src: "{{ forgejo_runner_data_dir }}/.runner-secret"
+  register: forgejo_runner_secret_raw
+  when: not forgejo_runner_config_stat.stat.exists
+
+- name: Register the runner secret with Forgejo (offline registration)
+  ansible.builtin.command: >
+    podman exec forgejo forgejo forgejo-cli actions register
+    --name {{ forgejo_runner_name }}
+    {{ '--scope ' + forgejo_runner_scope if forgejo_runner_scope else '' }}
+    --secret {{ (forgejo_runner_secret_raw.content | b64decode) | trim }}
+  become: true
+  become_user: "{{ forgejo_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ forgejo_uid.stdout }}"
+  register: forgejo_runner_register
+  changed_when: true
+  when: not forgejo_runner_config_stat.stat.exists
+
+- name: Deploy the runner's config.yml (this file IS the registration)
+  ansible.builtin.template:
+    src: runner-config.yml.j2
+    dest: "{{ forgejo_runner_data_dir }}/config.yml"
+    owner: "{{ forgejo_user }}"
+    group: "{{ forgejo_user }}"
+    mode: "0600"
+  vars:
+    forgejo_runner_instance_url: "http://forgejo:3000"
+    forgejo_runner_uuid: "{{ forgejo_runner_register.stdout | regex_search('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}') }}"
+    forgejo_runner_secret: "{{ (forgejo_runner_secret_raw.content | b64decode) | trim }}"
+  when: not forgejo_runner_config_stat.stat.exists
+
+- name: Deploy Forgejo Actions runner Quadlet unit
+  ansible.builtin.template:
+    src: forgejo-runner.container.j2
+    dest: "/home/{{ forgejo_user }}/.config/containers/systemd/forgejo-runner.container"
+    owner: "{{ forgejo_user }}"
+    group: "{{ forgejo_user }}"
+    mode: "0644"
+  register: forgejo_runner_quadlet
+
+- name: Reload systemd user daemon for {{ forgejo_user }} (picks up new runner Quadlet unit)
+  ansible.builtin.systemd:
+    daemon_reload: true
+    scope: user
+  become: true
+  become_user: "{{ forgejo_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ forgejo_uid.stdout }}"
+  when: forgejo_runner_quadlet.changed
+
+- name: Enable and start the Forgejo Actions runner service
+  ansible.builtin.systemd:
+    name: forgejo-runner.service
     scope: user
     state: started
     enabled: true

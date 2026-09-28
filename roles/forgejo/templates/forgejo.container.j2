@@ -7,6 +7,7 @@ Wants=network-online.target
 Image={{ forgejo_image }}
 ContainerName=forgejo
 AutoUpdate=registry
+Network={{ forgejo_network_name }}.network
 Environment=USER_UID={{ forgejo_uid.stdout }}
 Environment=USER_GID={{ forgejo_gid.stdout }}
 Volume={{ forgejo_data_dir }}/data:/data:Z

@@ -4,3 +4,20 @@ forgejo_image: "codeberg.org/forgejo/forgejo:10"
 forgejo_data_dir: "/home/{{ forgejo_user }}/forgejo-data"
 forgejo_http_port: 3000
 forgejo_ssh_port: 2222
+forgejo_network_name: forgejo
+
+# Forgejo Actions runner (rootless, runs alongside Forgejo under the same
+# user). Registered via Forgejo's "offline registration" CLI flow, which is
+# built for scripted/IaC setups like this one and needs no web-UI click-through.
+#
+# NOTE: no numeric tag has been pinned here (unlike forgejo_image) because
+# the runner's registry (code.forgejo.org) uses a tagging scheme this role
+# hasn't verified against a specific stable release at write time. Check
+# https://code.forgejo.org/forgejo/-/packages/container/runner for a current
+# version tag and pin it once you've confirmed one, the same way forgejo_image is pinned.
+forgejo_runner_image: "code.forgejo.org/forgejo/runner:latest"
+forgejo_runner_name: "{{ ansible_hostname }}"
+forgejo_runner_labels:
+  - "docker:docker://node:22-bookworm"
+forgejo_runner_scope: ""  # empty = instance-wide; or an org/user/repo name to scope it
+forgejo_runner_data_dir: "/home/{{ forgejo_user }}/forgejo-runner-data"

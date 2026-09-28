@@ -1,0 +1,22 @@
+[Unit]
+Description=Obsidian (browser-accessible desktop via KasmVNC) container
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image={{ obsidian_image }}
+ContainerName=obsidian
+AutoUpdate=registry
+Environment=PUID={{ obsidian_uid.stdout }}
+Environment=PGID={{ obsidian_gid.stdout }}
+Environment=TZ={{ obsidian_timezone }}
+Volume={{ obsidian_data_dir }}/config:/config:Z
+PublishPort={{ obsidian_http_port }}:3000
+PublishPort={{ obsidian_https_port }}:3001
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target
