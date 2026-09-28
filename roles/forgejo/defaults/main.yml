@@ -1,0 +1,6 @@
+---
+forgejo_user: git
+forgejo_image: "codeberg.org/forgejo/forgejo:10"
+forgejo_data_dir: "/home/{{ forgejo_user }}/forgejo-data"
+forgejo_http_port: 3000
+forgejo_ssh_port: 2222

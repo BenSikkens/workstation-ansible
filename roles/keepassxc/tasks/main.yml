@@ -1,0 +1,9 @@
+---
+# KeePassXC is packaged directly in Fedora's official repos, no extra
+# repo or GPG key setup needed.
+
+- name: Install KeePassXC (RedHat family)
+  ansible.builtin.dnf:
+    name: keepassxc
+    state: present
+  when: ansible_facts['os_family'] == "RedHat"

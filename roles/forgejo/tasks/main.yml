@@ -1,0 +1,99 @@
+---
+# Runs Forgejo as a rootless Podman container under a dedicated 'git' user,
+# managed as a systemd user service via Podman Quadlet.
+
+- name: Install podman and rootless container dependencies
+  ansible.builtin.dnf:
+    name:
+      - podman
+      - slirp4netns
+      - passt
+      - fuse-overlayfs
+    state: present
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Create the {{ forgejo_user }} user
+  ansible.builtin.user:
+    name: "{{ forgejo_user }}"
+    system: false
+    shell: /bin/bash
+    create_home: true
+    state: present
+
+- name: Enable systemd lingering for {{ forgejo_user }} (allows user services to run without an active login)
+  ansible.builtin.command: "loginctl enable-linger {{ forgejo_user }}"
+  args:
+    creates: "/var/lib/systemd/linger/{{ forgejo_user }}"
+
+- name: Look up {{ forgejo_user }} uid
+  ansible.builtin.command: "id -u {{ forgejo_user }}"
+  register: forgejo_uid
+  changed_when: false
+
+- name: Look up {{ forgejo_user }} gid
+  ansible.builtin.command: "id -g {{ forgejo_user }}"
+  register: forgejo_gid
+  changed_when: false
+
+- name: Ensure {{ forgejo_user }}'s systemd user manager is running
+  ansible.builtin.systemd:
+    name: "user@{{ forgejo_uid.stdout }}.service"
+    state: started
+
+- name: Create Forgejo data directory
+  ansible.builtin.file:
+    path: "{{ forgejo_data_dir }}/data"
+    state: directory
+    owner: "{{ forgejo_user }}"
+    group: "{{ forgejo_user }}"
+    mode: "0750"
+    recurse: true
+
+- name: Create Quadlet directory for {{ forgejo_user }}
+  ansible.builtin.file:
+    path: "/home/{{ forgejo_user }}/.config/containers/systemd"
+    state: directory
+    owner: "{{ forgejo_user }}"
+    group: "{{ forgejo_user }}"
+    mode: "0755"
+    recurse: true
+
+- name: Deploy Forgejo Quadlet unit
+  ansible.builtin.template:
+    src: forgejo.container.j2
+    dest: "/home/{{ forgejo_user }}/.config/containers/systemd/forgejo.container"
+    owner: "{{ forgejo_user }}"
+    group: "{{ forgejo_user }}"
+    mode: "0644"
+  register: forgejo_quadlet
+
+- name: Open firewall ports for Forgejo (http + ssh)
+  ansible.posix.firewalld:
+    port: "{{ item }}/tcp"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop:
+    - "{{ forgejo_http_port }}"
+    - "{{ forgejo_ssh_port }}"
+
+- name: Reload systemd user daemon for {{ forgejo_user }} (picks up new Quadlet unit)
+  ansible.builtin.systemd:
+    daemon_reload: true
+    scope: user
+  become: true
+  become_user: "{{ forgejo_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ forgejo_uid.stdout }}"
+  when: forgejo_quadlet.changed
+
+- name: Enable and start the Forgejo service
+  ansible.builtin.systemd:
+    name: forgejo.service
+    scope: user
+    state: started
+    enabled: true
+  become: true
+  become_user: "{{ forgejo_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ forgejo_uid.stdout }}"

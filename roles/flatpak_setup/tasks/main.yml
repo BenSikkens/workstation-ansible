@@ -1,0 +1,17 @@
+---
+# Fedora ships flatpak in its repos, but the Flathub remote isn't enabled
+# by default. This role is a dependency for any role that installs
+# software via Flatpak (e.g. podman_desktop).
+
+- name: Install flatpak package (RedHat family)
+  ansible.builtin.dnf:
+    name: flatpak
+    state: present
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Ensure Flathub remote is configured
+  community.general.flatpak_remote:
+    name: flathub
+    state: present
+    flatpakrepo_url: https://dl.flathub.org/repo/flathub.flatpakrepo
+    method: system

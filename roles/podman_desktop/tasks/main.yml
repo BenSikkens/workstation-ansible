@@ -1,0 +1,9 @@
+---
+# Podman Desktop has no official RPM for Fedora; upstream recommends
+# installing it via the Flathub flatpak. See: https://podman-desktop.io/downloads
+
+- name: Install Podman Desktop (flatpak)
+  community.general.flatpak:
+    name: io.podman_desktop.PodmanDesktop
+    state: present
+    method: system

@@ -1,0 +1,9 @@
+---
+# Fedora Workstation ships with only a minimal 'vi' alias by default;
+# this installs the full vim package.
+
+- name: Install vim (RedHat family)
+  ansible.builtin.dnf:
+    name: vim-enhanced
+    state: present
+  when: ansible_facts['os_family'] == "RedHat"

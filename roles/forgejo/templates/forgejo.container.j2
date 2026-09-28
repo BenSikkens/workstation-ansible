@@ -1,0 +1,21 @@
+[Unit]
+Description=Forgejo (self-hosted git) container
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image={{ forgejo_image }}
+ContainerName=forgejo
+AutoUpdate=registry
+Environment=USER_UID={{ forgejo_uid.stdout }}
+Environment=USER_GID={{ forgejo_gid.stdout }}
+Volume={{ forgejo_data_dir }}/data:/data:Z
+PublishPort={{ forgejo_http_port }}:3000
+PublishPort={{ forgejo_ssh_port }}:22
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

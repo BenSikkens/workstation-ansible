@@ -1,0 +1,23 @@
+---
+# Entry point for provisioning a fresh Fedora (or other Linux) workstation.
+#
+# Usage:
+#   ansible-playbook site.yml
+#   ansible-playbook site.yml --ask-become-pass   # if passwordless sudo isn't set up
+#
+# Add new software by:
+#   1. Creating a new role under roles/<name>/tasks/main.yml
+#   2. Adding it to the `roles:` list below
+
+- name: Provision workstation software
+  hosts: workstation
+  become: true
+  gather_facts: true
+
+  roles:
+    - flatpak_setup
+    - podman_desktop
+    - vim
+    - vscodium
+    - keepassxc
+    - forgejo

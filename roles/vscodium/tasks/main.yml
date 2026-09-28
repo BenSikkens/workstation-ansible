@@ -1,0 +1,26 @@
+---
+# Official install method for RPM-based distros.
+# Docs: https://vscodium.com/#install (Fedora/RHEL section)
+
+- name: Import VSCodium GPG key
+  ansible.builtin.rpm_key:
+    key: https://gitlab.com/paulcarroty/vscodium-deb-rpm-repo/raw/master/pub.gpg
+    state: present
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Add VSCodium yum repo
+  ansible.builtin.yum_repository:
+    name: vscodium
+    description: VSCodium
+    baseurl: https://download.vscodium.com/rpms/
+    gpgcheck: true
+    gpgkey: https://gitlab.com/paulcarroty/vscodium-deb-rpm-repo/raw/master/pub.gpg
+    metadata_expire: "1h"
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Install VSCodium
+  ansible.builtin.dnf:
+    name: codium
+    state: present
+    update_cache: true
+  when: ansible_facts['os_family'] == "RedHat"
