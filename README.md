@@ -60,7 +60,7 @@ To make a role portable to Debian/Arch/etc. later, either:
 | `keepassxc` | KeePassXC | dnf |
 | `mkcert` | mkcert | dnf |
 | `forgejo` | Forgejo (self-hosted git) + Actions runner | two rootless Podman containers via Quadlet, under a dedicated `git` user |
-| `obsidian` | Obsidian | rootless Podman container via Quadlet, under a dedicated `obsidian` user |
+| `obsidian` | Obsidian | Flatpak (Flathub) |
 
 ### Forgejo (self-hosted git server)
 
@@ -142,45 +142,7 @@ Runners**.
 
 ### Obsidian
 
-Obsidian is a native desktop app with no official container image, so
-there's no clean way to run it rootlessly without forwarding the host's
-X11/Wayland socket into the container — which defeats the isolation the
-"rootless container" ask is for. Instead this role uses
-[linuxserver.io's Obsidian image](https://docs.linuxserver.io/images/docker-obsidian/),
-which serves a full desktop over the browser (via KasmVNC) — you open
-`http://localhost:8484` and get Obsidian running in a virtual desktop,
-fully contained, no host display integration required.
-
-Runs as a **rootless** Podman container under a dedicated `obsidian` user,
-managed the same way as Forgejo: a Quadlet unit at
-`~obsidian/.config/containers/systemd/obsidian.container`, with systemd
-lingering enabled so it survives reboots.
-
-Defaults (override in `roles/obsidian/defaults/main.yml` or via
-`group_vars/all.yml`):
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `obsidian_user` | `obsidian` | system user the container runs as |
-| `obsidian_image` | `lscr.io/linuxserver/obsidian:latest` | web-desktop image bundling Obsidian |
-| `obsidian_data_dir` | `/home/obsidian/obsidian-data` | persistent config + vaults on the host |
-| `obsidian_http_port` | `8484` | web desktop (picked to avoid clashing with Forgejo's 3000) |
-| `obsidian_https_port` | `8485` | web desktop over https (self-signed) |
-| `obsidian_timezone` | `Etc/UTC` | container `TZ`, set this to your own timezone |
-
-After running the playbook:
-
-- Open `http://localhost:8484` in a browser — you'll land in a virtual
-  desktop with Obsidian ready to open or create a vault
-- Vaults and app config persist under `{{ obsidian_data_dir }}/config` on
-  the host
-- Check the service directly:
-  ```bash
-  sudo machinectl shell obsidian@
-  systemctl --user status obsidian.service
-  podman logs obsidian
-  ```
-
-**Note:** if you'd rather run Obsidian natively (not containerized) with
-your vault living directly in your home directory, Flatpak (`md.obsidian.Obsidian`
-on Flathub) is the simpler path — say so and I'll swap this role for that.
+Installed via Flathub (`md.obsidian.Obsidian`), same pattern as
+`podman_desktop` — runs natively as a normal desktop window, with vaults
+living wherever you choose in your own home directory rather than inside
+a container's data volume.
