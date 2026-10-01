@@ -33,6 +33,48 @@ ansible-playbook site.yml
 
 If your user doesn't have passwordless sudo configured, add `--ask-become-pass`.
 
+## Before running: review what will change
+
+Always preview a run before applying it, especially after editing a role or
+pulling in someone else's change:
+
+```bash
+ansible-playbook site.yml --ask-become-pass --check --diff
+```
+
+`--check` runs without making changes; `--diff` shows the exact before/after
+of any file this would write. Nothing here will run the risk of silently
+clobbering something you can't see coming back.
+
+### Where this playbook can overwrite something, and what's done about it
+
+Most tasks here (`dnf`, `community.general.flatpak`) only install packages —
+they never touch your existing configuration or data, so there's nothing to
+protect there. The places that *do* write a file outright are:
+
+- The Forgejo/Forgejo-runner Quadlet units (`roles/forgejo/templates/*.j2`,
+  deployed via `ansible.builtin.template`) — these are re-rendered and
+  reapplied on every run by design, so that changing a default (say, a port
+  or image tag) propagates on the next `ansible-playbook` run. They all use
+  `backup: true`, so if content changes, Ansible saves a timestamped copy of
+  the previous version right next to it before overwriting — nothing is
+  ever lost, even if the file does change.
+- The Forgejo runner's `config.yml` is the exception: it's only ever written
+  **once**, guarded by `when: not forgejo_runner_config_stat.stat.exists` —
+  once it exists, the role leaves it alone permanently (this is what holds
+  the registration secret, so overwriting it would re-register the runner).
+- Forgejo's own application config (`app.ini`, inside the data volume) and
+  any vault/repo data are never templated or written by this playbook at
+  all — Forgejo manages those itself, so there's nothing here that could
+  clobber them.
+
+If you ever hand-edit a Quadlet unit directly on the box, know that the next
+playbook run will overwrite it back to the template's version (with a backup
+kept) — that's standard Ansible/infrastructure-as-code behavior: the repo is
+the source of truth. If you want a hand-edit to stick, make the equivalent
+change in the `.j2` template (or the role's `defaults/main.yml`) instead of
+editing the deployed file, so the change survives the next run too.
+
 ## Adding new software
 
 1. Create a new role: `ansible-galaxy init roles/<name> --offline` (or just make
