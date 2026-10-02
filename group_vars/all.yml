@@ -1,0 +1,10 @@
+---
+# Variables shared across all roles.
+#
+# desktop_user: the actual human logged into this workstation's GNOME
+# session — distinct from the dedicated service users (git, obsidian)
+# other roles create for themselves. Defaults to whoever is running
+# `ansible-playbook` right now (resolved on the controller, not through
+# become, since this is a local connection). Override here if you ever
+# run this playbook as a different account than your own desktop login.
+desktop_user: "{{ lookup('env', 'USER') }}"

@@ -1,0 +1,115 @@
+---
+# Installs todo.txt-cli (the dependency) and the "Todo.txt" GNOME Shell
+# extension (https://extensions.gnome.org/extension/570/todotxt/) for
+# {{ desktop_user }} — the actual human logged into this workstation,
+# not a dedicated service account like the forgejo/obsidian roles use.
+#
+# NOTE: enabling a GNOME Shell extension writes to the desktop user's
+# dconf database over D-Bus, which needs that user's session bus to
+# exist. Run this playbook while logged into your GNOME session (not
+# from a plain TTY or over SSH with no active desktop session), or the
+# "Enable" task below will fail.
+
+# --- todo.txt-cli ------------------------------------------------------
+
+- name: Resolve latest todo.txt-cli release from GitHub
+  ansible.builtin.uri:
+    url: "https://api.github.com/repos/todotxt/todo.txt-cli/releases/latest"
+    return_content: true
+  register: todotxt_cli_release
+  when: todotxt_cli_version == "latest"
+
+- name: Set todo.txt-cli source tarball URL
+  ansible.builtin.set_fact:
+    todotxt_cli_tarball_url: >-
+      {{ todotxt_cli_release.json.tarball_url if todotxt_cli_version == "latest"
+      else 'https://github.com/todotxt/todo.txt-cli/archive/refs/tags/' + todotxt_cli_version + '.tar.gz' }}
+
+- name: Create todo.txt-cli install directory
+  ansible.builtin.file:
+    path: "{{ todotxt_cli_install_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Download and extract todo.txt-cli (skipped if already installed)
+  ansible.builtin.unarchive:
+    src: "{{ todotxt_cli_tarball_url }}"
+    dest: "{{ todotxt_cli_install_dir }}"
+    remote_src: true
+    extra_opts:
+      - "--strip-components=1"
+    creates: "{{ todotxt_cli_install_dir }}/todo.sh"
+
+- name: Make todo.sh executable
+  ansible.builtin.file:
+    path: "{{ todotxt_cli_install_dir }}/todo.sh"
+    mode: "0755"
+
+- name: Symlink todo.sh onto PATH as 'todo.sh' and 'todo'
+  ansible.builtin.file:
+    src: "{{ todotxt_cli_install_dir }}/todo.sh"
+    dest: "/usr/local/bin/{{ item }}"
+    state: link
+    force: true
+  loop:
+    - todo.sh
+    - todo
+
+# --- GNOME Shell extension ---------------------------------------------
+
+- name: Look up {{ desktop_user }} uid
+  ansible.builtin.command: "id -u {{ desktop_user }}"
+  register: desktop_uid
+  changed_when: false
+
+- name: Detect installed GNOME Shell version
+  ansible.builtin.command: gnome-shell --version
+  register: gnome_shell_version_raw
+  changed_when: false
+
+- name: Set GNOME Shell major version
+  ansible.builtin.set_fact:
+    gnome_shell_major_version: "{{ gnome_shell_version_raw.stdout | regex_search('[0-9]+') }}"
+
+- name: Query extensions.gnome.org for the Todo.txt extension
+  ansible.builtin.uri:
+    url: "https://extensions.gnome.org/extension-info/?pk={{ todotxt_gnome_extension_pk }}&shell_version={{ gnome_shell_major_version }}"
+    return_content: true
+  register: todotxt_extension_info
+
+- name: Set Todo.txt extension facts
+  ansible.builtin.set_fact:
+    todotxt_extension_uuid: "{{ todotxt_extension_info.json.uuid }}"
+    todotxt_extension_download_url: "https://extensions.gnome.org{{ todotxt_extension_info.json.download_url }}"
+
+- name: Check whether the Todo.txt extension is already installed for {{ desktop_user }}
+  ansible.builtin.stat:
+    path: "/home/{{ desktop_user }}/.local/share/gnome-shell/extensions/{{ todotxt_extension_uuid }}"
+  register: todotxt_extension_dir_stat
+
+- name: Create the extension's directory for {{ desktop_user }}
+  ansible.builtin.file:
+    path: "/home/{{ desktop_user }}/.local/share/gnome-shell/extensions/{{ todotxt_extension_uuid }}"
+    state: directory
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0755"
+  when: not todotxt_extension_dir_stat.stat.exists
+
+- name: Download and install the Todo.txt GNOME Shell extension
+  ansible.builtin.unarchive:
+    src: "{{ todotxt_extension_download_url }}"
+    dest: "/home/{{ desktop_user }}/.local/share/gnome-shell/extensions/{{ todotxt_extension_uuid }}"
+    remote_src: true
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+  when: not todotxt_extension_dir_stat.stat.exists
+
+- name: Enable the Todo.txt extension for {{ desktop_user }}
+  ansible.builtin.command: "gnome-extensions enable {{ todotxt_extension_uuid }}"
+  become: true
+  become_user: "{{ desktop_user }}"
+  environment:
+    DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/{{ desktop_uid.stdout }}/bus"
+  register: todotxt_extension_enable
+  changed_when: "'already enabled' not in (todotxt_extension_enable.stderr | default(''))"

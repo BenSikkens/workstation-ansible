@@ -35,10 +35,23 @@
   register: forgejo_gid
   changed_when: false
 
-- name: Ensure {{ forgejo_user }}'s systemd user manager is running
+- name: Reload systemd unit cache (picks up the newly created user's user@.service instance)
   ansible.builtin.systemd:
-    name: "user@{{ forgejo_uid.stdout }}.service"
-    state: started
+    daemon_reload: true
+
+# Using ansible.builtin.systemd here (rather than command) can fail with
+# "Service is in unknown state" right after a brand-new user is created in
+# the same run: `systemctl show user@<uid>.service` can momentarily return
+# an empty property set before systemd/logind has fully registered the
+# just-enabled lingering session, and the module has no status to parse.
+# Starting it directly and retrying sidesteps that status-parsing entirely.
+- name: Ensure {{ forgejo_user }}'s systemd user manager is running
+  ansible.builtin.command: "systemctl start user@{{ forgejo_uid.stdout }}.service"
+  register: forgejo_user_manager_start
+  until: forgejo_user_manager_start.rc == 0
+  retries: 5
+  delay: 3
+  changed_when: true
 
 - name: Enable rootless Podman socket for {{ forgejo_user }} (needed by the Actions runner's docker-executor labels)
   ansible.builtin.systemd:

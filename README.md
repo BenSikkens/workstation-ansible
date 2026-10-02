@@ -103,6 +103,7 @@ To make a role portable to Debian/Arch/etc. later, either:
 | `mkcert` | mkcert | dnf |
 | `forgejo` | Forgejo (self-hosted git) + Actions runner | two rootless Podman containers via Quadlet, under a dedicated `git` user |
 | `obsidian` | Obsidian | Flatpak (Flathub) |
+| `todotxt` | todo.txt-cli + GNOME Shell "Todo.txt" extension | upstream GitHub tarball + extensions.gnome.org, for `desktop_user` |
 
 ### Forgejo (self-hosted git server)
 
@@ -188,3 +189,41 @@ Installed via Flathub (`md.obsidian.Obsidian`), same pattern as
 `podman_desktop` — runs natively as a normal desktop window, with vaults
 living wherever you choose in your own home directory rather than inside
 a container's data volume.
+
+### todo.txt-cli + GNOME Shell extension
+
+Installs the [Todo.txt](https://extensions.gnome.org/extension/570/todotxt/)
+GNOME Shell extension and its dependency, `todo.txt-cli`.
+
+This is the first role that acts on **your own desktop login** rather than
+a dedicated service user — GNOME Shell extensions are per-user, so there's
+no "git" or "obsidian"-style service account to hide behind. It uses a new
+shared variable, `desktop_user` (set in `group_vars/all.yml`), which
+defaults to whoever actually runs `ansible-playbook`. Override it there if
+you ever run this playbook as someone other than your own login.
+
+**`todo.txt-cli`** has no Fedora package, so it's built from upstream's
+GitHub releases: `todotxt_cli_version` defaults to `"latest"`, resolved via
+the GitHub API at run time, and installed to `/opt/todo.txt-cli` with
+`todo.sh` (and a bare `todo` alias) symlinked onto `/usr/local/bin`. Pin a
+specific tag (e.g. `"v2.12.0"`) instead if you want it to stop moving.
+
+**The extension** is resolved dynamically through extensions.gnome.org's
+`extension-info` API, keyed by its numeric id (`570`, from the URL above) —
+this hands back the right build for whatever GNOME Shell version is
+actually installed, so there's no UUID or version hardcoded here to go
+stale. It's downloaded straight into
+`~{{ desktop_user }}/.local/share/gnome-shell/extensions/<uuid>/` and only
+installed once (same "write once, leave alone" pattern as the Forgejo
+runner's `config.yml` — if GNOME's own update mechanism later replaces it,
+this role won't overwrite that).
+
+**Important:** enabling the extension (`gnome-extensions enable`) writes to
+your dconf database over your session's D-Bus — that only exists while
+you're logged into GNOME. **Run this playbook from a terminal inside your
+active GNOME session**, not from a plain TTY or a headless SSH session with
+nobody logged in graphically, or that last step will fail.
+
+After running the playbook, you likely need to either log out and back in,
+or restart GNOME Shell (<kbd>Alt</kbd>+<kbd>F2</kbd>, type `r`, Enter — X11
+only; Wayland needs a full log out/in) before the extension shows up.

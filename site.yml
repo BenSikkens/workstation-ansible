@@ -21,5 +21,6 @@
     - vscodium
     - keepassxc
     - mkcert
-    #- forgejo
+    - forgejo
     - obsidian
+    - todotxt

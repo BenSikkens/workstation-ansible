@@ -1,0 +1,14 @@
+---
+# todo.txt-cli: not packaged for Fedora, so this role builds it from
+# upstream's GitHub releases. "latest" resolves the current release via
+# the GitHub API at run time; pin an exact tag (e.g. "v2.12.0") instead
+# if you want this to stop moving.
+todotxt_cli_version: "latest"
+todotxt_cli_install_dir: /opt/todo.txt-cli
+
+# The GNOME Shell extension: https://extensions.gnome.org/extension/570/todotxt/
+# Resolved dynamically via extensions.gnome.org's extension-info API (keyed
+# by this numeric id) rather than hardcoding a UUID, since that API also
+# hands back the right download for whatever GNOME Shell version is
+# actually installed.
+todotxt_gnome_extension_pk: 570
