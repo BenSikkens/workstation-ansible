@@ -1,0 +1,33 @@
+# Managed by Ansible (roles/forgejo). Rebuilt automatically when this file
+# changes, i.e. when a scanner toggle in group_vars/all.yml is flipped.
+FROM {{ forgejo_ci_base_image }}
+{% if forgejo_runner_install_gitleaks %}
+
+COPY --from={{ forgejo_gitleaks_image }} /usr/bin/gitleaks /usr/local/bin/gitleaks
+{% endif %}
+{% if forgejo_runner_install_trivy %}
+
+COPY --from={{ forgejo_trivy_image }} /usr/local/bin/trivy /usr/local/bin/trivy
+{% endif %}
+{% if forgejo_runner_install_semgrep %}
+
+# Debian 12 marks system Python as externally managed (PEP 668), hence the venv.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 python3-venv \
+ && rm -rf /var/lib/apt/lists/* \
+ && python3 -m venv /opt/semgrep \
+ && /opt/semgrep/bin/pip install --no-cache-dir semgrep \
+ && ln -s /opt/semgrep/bin/semgrep /usr/local/bin/semgrep
+{% endif %}
+
+# jq is needed by scan-report; curl ships with the node base image.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends jq \
+ && rm -rf /var/lib/apt/lists/*
+
+# Sends scanner results to the Pushgateway (Grafana "Security scans" dashboard).
+COPY scan-report.sh /usr/local/bin/scan-report
+RUN chmod 0755 /usr/local/bin/scan-report
+{% if monitoring_enabled | default(false) | bool %}
+ENV SCAN_REPORT_PUSHGATEWAY=http://pushgateway:{{ monitoring_pushgateway_port | default(9091) }}
+{% endif %}

@@ -1,0 +1,26 @@
+[Unit]
+Description=Prometheus (metrics database)
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image={{ monitoring_prometheus_image }}
+ContainerName=prometheus
+AutoUpdate=registry
+Network=monitoring.network
+# Loopback only: Alloy (on the host) writes to it, Grafana reads it over the
+# monitoring network by name.
+PublishPort=127.0.0.1:{{ monitoring_prometheus_port }}:9090
+# Named volume; :U hands it to the container's own (non-root) user.
+Volume=prometheus-data:/prometheus:U
+Volume={{ monitoring_config_dir }}/prometheus.yml:/etc/prometheus/prometheus.yml:ro,Z
+# --web.enable-remote-write-receiver: Alloy pushes host, Podman and scan
+# metrics here instead of Prometheus scraping other users' loopback ports.
+Exec=--config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus --storage.tsdb.retention.time={{ monitoring_prometheus_retention }} --web.enable-remote-write-receiver --web.listen-address=0.0.0.0:9090
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

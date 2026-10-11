@@ -1,0 +1,8 @@
+---
+# Values the `homelab` command needs to know about. Each falls back to the
+# default of the role it describes, so this role also works on its own.
+homelab_forgejo_user: "{{ forgejo_user | default('git') }}"
+homelab_forgejo_http_port: "{{ forgejo_http_port | default(3000) }}"
+homelab_monitoring_enabled: "{{ monitoring_enabled | default(false) | bool }}"
+homelab_monitoring_user: "{{ monitoring_user | default('monitoring') }}"
+homelab_grafana_port: "{{ monitoring_grafana_port | default(3001) }}"

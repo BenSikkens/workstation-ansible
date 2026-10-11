@@ -1,0 +1,41 @@
+---
+# Monitoring: Grafana + Prometheus + Loki, run as rootless Podman containers
+# under their own 'monitoring' user, fed by a host agent (Grafana Alloy) and
+# per-user Podman exporters. Everything listens on 127.0.0.1 only.
+#
+# The on/off switch (monitoring_enabled) lives in group_vars/all.yml.
+
+monitoring_user: monitoring
+
+# Image tags verified to exist on Docker Hub when this role was written.
+# Bump deliberately; Grafana/Loki migrate their own data forward on upgrade.
+monitoring_grafana_image: "docker.io/grafana/grafana:13.0"
+monitoring_prometheus_image: "docker.io/prom/prometheus:v3.14.0"
+monitoring_loki_image: "docker.io/grafana/loki:3.7.7"
+monitoring_pushgateway_image: "docker.io/prom/pushgateway:v1.11.4"
+
+# Host ports, all bound to 127.0.0.1. Forgejo itself uses 3000 and 2222.
+monitoring_grafana_port: 3001
+monitoring_prometheus_port: 9094
+monitoring_loki_port: 3100
+monitoring_pushgateway_port: 9091
+
+# How long data is kept. Raise if you have the disk for it.
+monitoring_prometheus_retention: 30d
+monitoring_loki_retention: 336h   # 14 days
+
+# One prometheus-podman-exporter per user whose rootless containers should be
+# graphed: the service user (Forgejo, runner, CI job containers) and the
+# desktop user (Podman Desktop). Each listens on its own loopback port.
+monitoring_podman_exporters:
+  - user: "{{ forgejo_user | default('git') }}"
+    port: 9882
+  - user: "{{ desktop_user }}"
+    port: 9883
+
+# Where the monitoring user keeps its generated config (bind-mounted read-only).
+monitoring_config_dir: "/home/{{ monitoring_user }}/monitoring-config"
+
+# Grafana Alloy (the host agent): installed from Grafana's RPM repository.
+monitoring_alloy_repo_baseurl: "https://rpm.grafana.com"
+monitoring_alloy_repo_gpgkey: "https://rpm.grafana.com/gpg.key"

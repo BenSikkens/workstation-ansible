@@ -1,0 +1,235 @@
+---
+# Forgejo Actions runner.
+#
+# Registered via Forgejo's "offline registration" CLI flow (forgejo-cli
+# actions register --secret), which is meant for scripted setups like this
+# one: we generate our own secret, hand it to Forgejo via `podman exec`, and
+# get back a UUID to pair with it. No web-UI click-through needed, and no
+# separate `forgejo-runner register` step — the UUID/secret pair in the
+# runner's config.yml is itself the registration.
+# Docs: https://forgejo.org/docs/latest/admin/actions/registration/
+#
+# The pair is kept in two small files (.runner-uuid, .runner-secret, mode
+# 0600) so that config.yml can be re-rendered on every run. That is what
+# lets changes to labels and scanner toggles take effect after the first
+# install; registration itself still happens exactly once.
+
+- name: Check for the runner's stored UUID
+  ansible.builtin.stat:
+    path: "{{ forgejo_runner_data_dir }}/.runner-uuid"
+  register: forgejo_runner_uuid_stat
+
+- name: Check for an existing runner config.yml
+  ansible.builtin.stat:
+    path: "{{ forgejo_runner_data_dir }}/config.yml"
+  register: forgejo_runner_config_stat
+
+- name: Remember whether the runner was already registered before this run
+  ansible.builtin.set_fact:
+    forgejo_runner_pre_registered: "{{ forgejo_runner_uuid_stat.stat.exists or forgejo_runner_config_stat.stat.exists }}"
+
+# --- Existing installs -------------------------------------------------------
+# Earlier versions of this role wrote the UUID/secret only inside config.yml
+# (and never touched it again). Lift them out into their own files so the
+# runner stays registered when config.yml is re-rendered below.
+
+- name: Read the existing runner config.yml
+  ansible.builtin.slurp:
+    src: "{{ forgejo_runner_data_dir }}/config.yml"
+  register: forgejo_runner_legacy_config
+  when:
+    - forgejo_runner_config_stat.stat.exists
+    - not forgejo_runner_uuid_stat.stat.exists
+
+- name: Keep the existing runner's UUID in its own file
+  ansible.builtin.copy:
+    content: "{{ (forgejo_runner_legacy_config.content | b64decode | from_yaml).server.connections.forgejo.uuid }}\n"
+    dest: "{{ forgejo_runner_data_dir }}/.runner-uuid"
+    owner: "{{ forgejo_user }}"
+    group: "{{ forgejo_user }}"
+    mode: "0600"
+    force: false
+  when:
+    - forgejo_runner_config_stat.stat.exists
+    - not forgejo_runner_uuid_stat.stat.exists
+
+- name: Keep the existing runner's secret in its own file
+  ansible.builtin.copy:
+    content: "{{ (forgejo_runner_legacy_config.content | b64decode | from_yaml).server.connections.forgejo.token }}\n"
+    dest: "{{ forgejo_runner_data_dir }}/.runner-secret"
+    owner: "{{ forgejo_user }}"
+    group: "{{ forgejo_user }}"
+    mode: "0600"
+    force: false
+  diff: false  # keep the secret out of --diff output
+  when:
+    - forgejo_runner_config_stat.stat.exists
+    - not forgejo_runner_uuid_stat.stat.exists
+
+# --- First-time registration -------------------------------------------------
+
+# If Forgejo never comes up, say WHY instead of just "connection refused":
+# the rescue block collects the unit state, its journal, the container log
+# and the ownership of the data dir (the usual suspects) and prints them.
+- name: Wait for Forgejo's API to be ready (needed before we can register the runner)
+  when: not (forgejo_runner_pre_registered | bool)
+  block:
+    - name: Wait for the health endpoint
+      ansible.builtin.uri:
+        url: "http://localhost:{{ forgejo_http_port }}/api/healthz"
+        status_code: 200
+        use_proxy: false
+      register: forgejo_healthz
+      until: (forgejo_healthz.status | default(0)) == 200
+      retries: 24
+      delay: 5
+  rescue:
+    - name: Collect Forgejo diagnostics
+      ansible.builtin.shell: |
+        echo "--- systemctl --user status forgejo.service"
+        systemctl --user status forgejo.service --no-pager -l 2>&1 | tail -n 25
+        echo "--- journalctl --user -u forgejo.service"
+        journalctl --user -u forgejo.service -n 40 --no-pager 2>&1
+        echo "--- podman ps -a"
+        podman ps -a --format '{% raw %}{{.Names}}  {{.Status}}{% endraw %}' 2>&1
+        echo "--- podman logs forgejo"
+        podman logs --tail 40 forgejo 2>&1
+        echo "--- ls -ln {{ forgejo_data_dir }}/data (numeric owners)"
+        ls -ln {{ forgejo_data_dir }}/data 2>&1 | head -n 15
+      args:
+        executable: /bin/bash
+      become: true
+      become_user: "{{ forgejo_user }}"
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_uid.stdout }}"
+      register: forgejo_diag
+      changed_when: false
+      failed_when: false
+
+    - name: Show Forgejo diagnostics
+      ansible.builtin.debug:
+        msg: "{{ forgejo_diag.stdout_lines | default(['(no output)']) }}"
+
+    - name: Stop - Forgejo is not running
+      ansible.builtin.fail:
+        msg: >-
+          Forgejo did not answer on port {{ forgejo_http_port }} after 2 minutes. The diagnostics
+          above show the service state and container log. Nothing after this point was
+          changed. If a pre-install backup exists, `ansible-playbook forgejo-backup.yml`
+          can roll back to it.
+
+- name: Generate a random runner registration secret (idempotent, kept on disk)
+  ansible.builtin.shell: "umask 077 && openssl rand -hex 20 > {{ forgejo_runner_data_dir }}/.runner-secret"
+  args:
+    creates: "{{ forgejo_runner_data_dir }}/.runner-secret"
+  become: true
+  become_user: "{{ forgejo_user }}"
+  when: not (forgejo_runner_pre_registered | bool)
+
+- name: Read the freshly generated runner secret
+  ansible.builtin.slurp:
+    src: "{{ forgejo_runner_data_dir }}/.runner-secret"
+  register: forgejo_runner_secret_fresh
+  when: not (forgejo_runner_pre_registered | bool)
+
+# --user git: the Forgejo CLI refuses to run as root, which is what `podman exec`
+# defaults to inside the container ("Forgejo is not supposed to be run as root").
+- name: Register the runner secret with Forgejo (offline registration)
+  ansible.builtin.command: >
+    podman exec --user git forgejo forgejo forgejo-cli actions register
+    --name {{ forgejo_runner_name }}
+    {{ '--scope ' + forgejo_runner_scope if forgejo_runner_scope else '' }}
+    --secret {{ (forgejo_runner_secret_fresh.content | b64decode) | trim }}
+  become: true
+  become_user: "{{ forgejo_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ forgejo_uid.stdout }}"
+  register: forgejo_runner_register
+  changed_when: true
+  when: not (forgejo_runner_pre_registered | bool)
+
+- name: Store the UUID Forgejo assigned to the runner
+  ansible.builtin.copy:
+    content: "{{ forgejo_runner_register.stdout | regex_search('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}') }}\n"
+    dest: "{{ forgejo_runner_data_dir }}/.runner-uuid"
+    owner: "{{ forgejo_user }}"
+    group: "{{ forgejo_user }}"
+    mode: "0600"
+    force: false
+  when: not (forgejo_runner_pre_registered | bool)
+
+# --- config.yml (re-rendered every run) --------------------------------------
+
+- name: Read the runner's UUID
+  ansible.builtin.slurp:
+    src: "{{ forgejo_runner_data_dir }}/.runner-uuid"
+  register: forgejo_runner_uuid_raw
+
+- name: Read the runner's secret
+  ansible.builtin.slurp:
+    src: "{{ forgejo_runner_data_dir }}/.runner-secret"
+  register: forgejo_runner_secret_raw
+
+- name: Render the runner's config.yml
+  ansible.builtin.template:
+    src: runner-config.yml.j2
+    dest: "{{ forgejo_runner_data_dir }}/config.yml"
+    owner: "{{ forgejo_user }}"
+    group: "{{ forgejo_user }}"
+    mode: "0600"
+    backup: true
+  vars:
+    forgejo_runner_instance_url: "http://forgejo:3000"
+    forgejo_runner_uuid: "{{ forgejo_runner_uuid_raw.content | b64decode | trim }}"
+    forgejo_runner_secret: "{{ forgejo_runner_secret_raw.content | b64decode | trim }}"
+  diff: false  # config.yml contains the runner secret; keep it out of --diff output
+  register: forgejo_runner_config_render
+
+# --- Runner container --------------------------------------------------------
+
+- name: Deploy Forgejo Actions runner Quadlet unit
+  ansible.builtin.template:
+    src: forgejo-runner.container.j2
+    dest: "/home/{{ forgejo_user }}/.config/containers/systemd/forgejo-runner.container"
+    owner: "{{ forgejo_user }}"
+    group: "{{ forgejo_user }}"
+    mode: "0644"
+    backup: true
+  register: forgejo_runner_quadlet
+
+- name: Reload systemd user daemon for {{ forgejo_user }} (picks up new runner Quadlet unit)
+  ansible.builtin.systemd:
+    daemon_reload: true
+    scope: user
+  become: true
+  become_user: "{{ forgejo_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ forgejo_uid.stdout }}"
+  when: forgejo_runner_quadlet.changed
+
+- name: Enable and start the Forgejo Actions runner service
+  ansible.builtin.systemd:
+    name: forgejo-runner.service
+    scope: user
+    state: started
+    enabled: true
+  become: true
+  become_user: "{{ forgejo_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ forgejo_uid.stdout }}"
+
+# The runner only reads config.yml at startup. On a first install the task
+# above has just started it with the new file, so only restart a runner
+# that was already registered (and so possibly already running).
+- name: Restart the runner so config changes take effect
+  ansible.builtin.systemd:
+    name: forgejo-runner.service
+    scope: user
+    state: restarted
+  become: true
+  become_user: "{{ forgejo_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ forgejo_uid.stdout }}"
+  when:
+    - forgejo_runner_pre_registered | bool
+    - forgejo_runner_config_render.changed or forgejo_runner_quadlet.changed

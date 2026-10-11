@@ -8,3 +8,28 @@
 # become, since this is a local connection). Override here if you ever
 # run this playbook as a different account than your own desktop login.
 desktop_user: "{{ lookup('env', 'USER') }}"
+
+# --- Optional software ----------------------------------------------------
+# Security scanners baked into the Forgejo Actions CI image (see
+# roles/forgejo/tasks/ci_image.yml). All default to true; set one to false
+# to leave that tool out. Workflows opt in with `runs-on: scan`.
+# Changing a value and re-running the playbook rebuilds the image; if all
+# three are false, no image is built and the `scan` runner label is dropped.
+forgejo_runner_install_semgrep: true
+forgejo_runner_install_gitleaks: true
+forgejo_runner_install_trivy: true
+
+# --- Forgejo backup -------------------------------------------------------
+# When Forgejo data already exists, the playbook archives it (data, runner
+# data, Quadlet units) before changing anything. The archive is kept until you
+# run `ansible-playbook forgejo-backup.yml`, which restores it if the install
+# failed or removes it if the install succeeded. Set to false to skip backups.
+forgejo_backup_enabled: true
+# forgejo_backup_dir: /var/backups/forgejo   # root-only; needs free space for a copy of the data
+
+# --- Monitoring -----------------------------------------------------------
+# Grafana + Prometheus + Loki under a dedicated 'monitoring' user, plus the
+# agents that feed them (see roles/monitoring and the README). Everything
+# listens on 127.0.0.1 only. Set to false to skip installing it; `homelab`
+# then manages only the Forgejo stack.
+monitoring_enabled: true

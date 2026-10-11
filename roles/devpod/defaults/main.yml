@@ -1,0 +1,5 @@
+---
+# DevPod has no Fedora package (and upstream dropped deb/rpm packaging for
+# the desktop app too) — the CLI ships as a plain binary via GitHub's
+# stable "latest" download URL, so no version to pin or resolve here.
+devpod_install_path: /usr/local/bin/devpod

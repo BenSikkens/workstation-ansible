@@ -1,0 +1,173 @@
+---
+# The pieces that sit next to the stack and feed it:
+#   1. Pushgateway - a container under the Forgejo service user, on the Forgejo
+#      network, so CI job containers can reach it by name.
+#   2. prometheus-podman-exporter - one systemd *user* service per Podman user
+#      to graph (service user + desktop user).
+#   3. Grafana Alloy - one host-wide agent (system service) that ships host
+#      metrics, the exporters' metrics, the Pushgateway's scan results and the
+#      journal (incl. container logs) into Prometheus and Loki.
+
+- name: Check that the forgejo role has run (the Pushgateway joins its network)
+  ansible.builtin.assert:
+    that:
+      - forgejo_user is defined
+      - forgejo_network_name is defined
+    fail_msg: "The monitoring role must run after the forgejo role (list it after 'forgejo' in site.yml)."
+    quiet: true
+
+# ---------------------------------------------------------------- Pushgateway
+
+- name: Look up the Forgejo service user's uid
+  ansible.builtin.command: "id -u {{ forgejo_user }}"
+  register: monitoring_forgejo_uid
+  changed_when: false
+
+- name: Deploy the Pushgateway Quadlet unit
+  ansible.builtin.template:
+    src: pushgateway.container.j2
+    dest: "/home/{{ forgejo_user }}/.config/containers/systemd/pushgateway.container"
+    owner: "{{ forgejo_user }}"
+    group: "{{ forgejo_user }}"
+    mode: "0644"
+    backup: true
+  register: monitoring_pushgateway_quadlet
+
+- name: Reload the Forgejo user's systemd units (picks up the Pushgateway)  # noqa: no-handler
+  ansible.builtin.systemd:
+    daemon_reload: true
+    scope: user
+  become: true
+  become_user: "{{ forgejo_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ monitoring_forgejo_uid.stdout }}"
+  when: monitoring_pushgateway_quadlet.changed
+
+- name: Start the Pushgateway
+  ansible.builtin.systemd:
+    name: pushgateway.service
+    scope: user
+    state: "{{ 'restarted' if monitoring_pushgateway_quadlet.changed else 'started' }}"
+    enabled: true
+  become: true
+  become_user: "{{ forgejo_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ monitoring_forgejo_uid.stdout }}"
+
+# ----------------------------------------------------------- Podman exporters
+
+- name: Install the Podman exporter
+  ansible.builtin.dnf:
+    name: prometheus-podman-exporter
+    state: present
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Look up the uids of the users whose Podman is monitored
+  ansible.builtin.command: "id -u {{ item.user }}"
+  loop: "{{ monitoring_podman_exporters }}"
+  loop_control:
+    label: "{{ item.user }}"
+  register: monitoring_exporter_uids
+  changed_when: false
+
+# The uid list and monitoring_podman_exporters line up by index (idx).
+- name: Create the systemd user directory for each exporter user
+  ansible.builtin.file:
+    path: "/home/{{ item.user }}/.config/systemd/user"
+    state: directory
+    owner: "{{ item.user }}"
+    group: "{{ item.user }}"
+    mode: "0755"
+  loop: "{{ monitoring_podman_exporters }}"
+  loop_control:
+    label: "{{ item.user }}"
+
+- name: Deploy the Podman exporter user service
+  ansible.builtin.template:
+    src: prometheus-podman-exporter.service.j2
+    dest: "/home/{{ item.user }}/.config/systemd/user/prometheus-podman-exporter.service"
+    owner: "{{ item.user }}"
+    group: "{{ item.user }}"
+    mode: "0644"
+    backup: true
+  loop: "{{ monitoring_podman_exporters }}"
+  loop_control:
+    label: "{{ item.user }}"
+  register: monitoring_exporter_units
+
+- name: Reload each exporter user's systemd units
+  ansible.builtin.systemd:
+    daemon_reload: true
+    scope: user
+  become: true
+  become_user: "{{ item.user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ monitoring_exporter_uids.results[idx].stdout }}"
+  loop: "{{ monitoring_podman_exporters }}"
+  loop_control:
+    index_var: idx
+    label: "{{ item.user }}"
+
+- name: Start the Podman exporters
+  ansible.builtin.systemd:
+    name: prometheus-podman-exporter.service
+    scope: user
+    state: "{{ 'restarted' if monitoring_exporter_units.results[idx].changed else 'started' }}"
+    enabled: true
+  become: true
+  become_user: "{{ item.user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ monitoring_exporter_uids.results[idx].stdout }}"
+  loop: "{{ monitoring_podman_exporters }}"
+  loop_control:
+    index_var: idx
+    label: "{{ item.user }}"
+
+# ---------------------------------------------------------------------- Alloy
+
+- name: Trust Grafana's package signing key
+  ansible.builtin.rpm_key:
+    key: "{{ monitoring_alloy_repo_gpgkey }}"
+    state: present
+
+- name: Add Grafana's package repository
+  ansible.builtin.yum_repository:
+    name: grafana
+    description: grafana
+    baseurl: "{{ monitoring_alloy_repo_baseurl }}"
+    gpgcheck: true
+    repo_gpgcheck: true
+    gpgkey: "{{ monitoring_alloy_repo_gpgkey }}"
+    sslverify: true
+    enabled: true
+
+- name: Install Grafana Alloy
+  ansible.builtin.dnf:
+    name: alloy
+    state: present
+
+# Without these groups the journal source starts fine but reads nothing.
+- name: Let the alloy user read the systemd journal
+  ansible.builtin.user:
+    name: alloy
+    groups:
+      - adm
+      - systemd-journal
+    append: true
+  register: monitoring_alloy_groups
+
+- name: Render the Alloy configuration
+  ansible.builtin.template:
+    src: config.alloy.j2
+    dest: /etc/alloy/config.alloy
+    owner: root
+    group: alloy
+    mode: "0640"
+    backup: true
+  register: monitoring_alloy_config
+
+- name: Start Alloy
+  ansible.builtin.systemd:
+    name: alloy.service
+    state: "{{ 'restarted' if monitoring_alloy_groups.changed else ('reloaded' if monitoring_alloy_config.changed else 'started') }}"
+    enabled: true

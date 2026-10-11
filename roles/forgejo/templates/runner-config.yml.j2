@@ -1,7 +1,8 @@
-# Minimal Forgejo Actions runner config. Only the fields this role needs to
-# set are listed here — every field forgejo-runner supports has a built-in
-# default when omitted (cache, container, host tuning, etc.); see
-# https://forgejo.org/docs/latest/admin/actions/configuration/ to add more.
+# Forgejo Actions runner config, re-rendered by Ansible on every run (the
+# previous version is kept as a timestamped backup next to it). Edit the
+# template in roles/forgejo/templates/, not this file. Only the fields this
+# role needs are listed — everything else uses forgejo-runner's built-in
+# defaults; see https://forgejo.org/docs/latest/admin/actions/configuration/
 
 runner:
   name: "{{ forgejo_runner_name }}"
@@ -9,6 +10,17 @@ runner:
 {% for label in forgejo_runner_labels %}
     - "{{ label }}"
 {% endfor %}
+{% if forgejo_ci_image_enabled | bool %}
+    - "{{ forgejo_ci_label }}:docker://{{ forgejo_ci_image_name }}"
+{% endif %}
+
+container:
+  # Job containers join the same Podman network as Forgejo so the instance
+  # URL below (http://forgejo:3000) resolves inside a job; without this,
+  # actions/checkout cannot reach the server.
+  network: "{{ forgejo_network_name }}"
+  # The scanner image only exists in local storage; never try to pull it.
+  force_pull: false
 
 server:
   connections:

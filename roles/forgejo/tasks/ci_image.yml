@@ -1,0 +1,67 @@
+---
+# Builds the CI image that carries the scanners (semgrep, gitleaks, trivy)
+# into Forgejo Actions jobs. Which tools go in is controlled by the
+# forgejo_runner_install_* toggles in group_vars/all.yml (default: all true).
+#
+# The image lives in {{ forgejo_user }}'s rootless Podman storage, which is
+# the same storage the runner's job containers are created from (via the
+# podman socket), so no registry is involved. It is only rebuilt when it is
+# missing or its Containerfile changed. To pull newer scanner versions, run:
+#   sudo -u git podman rmi localhost/forgejo-ci:latest
+# and re-run the playbook.
+
+- name: Create CI image build directory
+  ansible.builtin.file:
+    path: "{{ forgejo_ci_build_dir }}"
+    state: directory
+    owner: "{{ forgejo_user }}"
+    group: "{{ forgejo_user }}"
+    mode: "0750"
+  when: forgejo_ci_image_enabled | bool
+
+- name: Render the CI image Containerfile
+  ansible.builtin.template:
+    src: Containerfile.j2
+    dest: "{{ forgejo_ci_build_dir }}/Containerfile"
+    owner: "{{ forgejo_user }}"
+    group: "{{ forgejo_user }}"
+    mode: "0644"
+    backup: true
+  register: forgejo_ci_containerfile
+  when: forgejo_ci_image_enabled | bool
+
+- name: Copy the scan-report helper into the build directory
+  ansible.builtin.copy:
+    src: scan-report.sh
+    dest: "{{ forgejo_ci_build_dir }}/scan-report.sh"
+    owner: "{{ forgejo_user }}"
+    group: "{{ forgejo_user }}"
+    mode: "0755"
+  register: forgejo_ci_scan_report
+  when: forgejo_ci_image_enabled | bool
+
+- name: Check whether the CI image already exists
+  ansible.builtin.command: "podman image exists {{ forgejo_ci_image_name }}"
+  become: true
+  become_user: "{{ forgejo_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ forgejo_uid.stdout }}"
+  register: forgejo_ci_image_exists
+  changed_when: false
+  failed_when: forgejo_ci_image_exists.rc not in [0, 1]
+  when: forgejo_ci_image_enabled | bool
+
+# Takes a few minutes on first run (base image pull + semgrep install).
+- name: Build the CI image
+  ansible.builtin.command: "podman build --tag {{ forgejo_ci_image_name }} --file Containerfile ."
+  args:
+    chdir: "{{ forgejo_ci_build_dir }}"
+  become: true
+  become_user: "{{ forgejo_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ forgejo_uid.stdout }}"
+  timeout: 3600
+  changed_when: true
+  when:
+    - forgejo_ci_image_enabled | bool
+    - forgejo_ci_containerfile.changed or forgejo_ci_scan_report.changed or forgejo_ci_image_exists.rc != 0

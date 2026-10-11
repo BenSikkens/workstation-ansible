@@ -1,0 +1,244 @@
+---
+# Grafana + Prometheus + Loki as rootless Podman containers under a dedicated
+# 'monitoring' user (Quadlet units, systemd user services), plus the agents
+# that feed them (agents.yml). Mirrors the structure of the forgejo role.
+
+- name: Install podman and rootless container dependencies
+  ansible.builtin.dnf:
+    name:
+      - podman
+      - passt
+      - fuse-overlayfs
+    state: present
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Create the monitoring user
+  ansible.builtin.user:
+    name: "{{ monitoring_user }}"
+    system: false
+    shell: /sbin/nologin
+    create_home: true
+    state: present
+
+- name: Enable systemd lingering for the monitoring user (user services run without a login)
+  ansible.builtin.command: "loginctl enable-linger {{ monitoring_user }}"
+  args:
+    creates: "/var/lib/systemd/linger/{{ monitoring_user }}"
+
+- name: Look up the monitoring user's uid
+  ansible.builtin.command: "id -u {{ monitoring_user }}"
+  register: monitoring_uid
+  changed_when: false
+
+- name: Reload systemd unit cache (picks up the new user's user@.service instance)
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+# Same workaround as the forgejo role: start user@UID directly and retry,
+# instead of the systemd module, which can hit "unknown state" right after a
+# brand-new user is created.
+- name: Ensure the monitoring user's systemd user manager is running
+  ansible.builtin.command: "systemctl start user@{{ monitoring_uid.stdout }}.service"  # noqa: command-instead-of-module
+  register: monitoring_user_manager_start
+  until: monitoring_user_manager_start.rc == 0
+  retries: 5
+  delay: 3
+  changed_when: true
+
+# --- config files (read-only bind mounts into the containers) ----------------
+# Directories 0755 / files 0644 on purpose: the containers run as their own
+# non-root uids, which under rootless Podman are neither this owner nor its
+# group, so they read these through the "other" bits.
+
+- name: Create the monitoring config directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ monitoring_user }}"
+    group: "{{ monitoring_user }}"
+    mode: "0755"
+  loop:
+    - "{{ monitoring_config_dir }}"
+    - "{{ monitoring_config_dir }}/grafana-provisioning"
+    - "{{ monitoring_config_dir }}/grafana-provisioning/datasources"
+    - "{{ monitoring_config_dir }}/grafana-provisioning/dashboards"
+    - "{{ monitoring_config_dir }}/dashboards"
+
+- name: Render the Prometheus config
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: "{{ monitoring_config_dir }}/prometheus.yml"
+    owner: "{{ monitoring_user }}"
+    group: "{{ monitoring_user }}"
+    mode: "0644"
+    backup: true
+  register: monitoring_prometheus_config
+
+- name: Render the Loki config
+  ansible.builtin.template:
+    src: loki-config.yml.j2
+    dest: "{{ monitoring_config_dir }}/loki-config.yml"
+    owner: "{{ monitoring_user }}"
+    group: "{{ monitoring_user }}"
+    mode: "0644"
+    backup: true
+  register: monitoring_loki_config
+
+- name: Render the Grafana data sources
+  ansible.builtin.template:
+    src: grafana-datasources.yml.j2
+    dest: "{{ monitoring_config_dir }}/grafana-provisioning/datasources/datasources.yml"
+    owner: "{{ monitoring_user }}"
+    group: "{{ monitoring_user }}"
+    mode: "0644"
+    backup: true
+  register: monitoring_grafana_datasources
+
+- name: Render the Grafana dashboard provider
+  ansible.builtin.template:
+    src: grafana-dashboards-provider.yml.j2
+    dest: "{{ monitoring_config_dir }}/grafana-provisioning/dashboards/dashboards.yml"
+    owner: "{{ monitoring_user }}"
+    group: "{{ monitoring_user }}"
+    mode: "0644"
+    backup: true
+  register: monitoring_grafana_provider
+
+# Grafana re-reads this directory every 60 seconds; no restart needed.
+- name: Install the Grafana dashboards
+  ansible.builtin.copy:
+    src: dashboards/
+    dest: "{{ monitoring_config_dir }}/dashboards/"
+    owner: "{{ monitoring_user }}"
+    group: "{{ monitoring_user }}"
+    mode: "0644"
+    directory_mode: "0755"
+
+# --- Grafana admin password (generated once, never overwritten) --------------
+
+- name: Generate a random Grafana admin password (kept on disk, 0600)
+  ansible.builtin.shell: "umask 077 && openssl rand -hex 16 > /home/{{ monitoring_user }}/.grafana-admin-password"
+  args:
+    creates: "/home/{{ monitoring_user }}/.grafana-admin-password"
+  become: true
+  become_user: "{{ monitoring_user }}"
+
+- name: Read the Grafana admin password
+  ansible.builtin.slurp:
+    src: "/home/{{ monitoring_user }}/.grafana-admin-password"
+  register: monitoring_grafana_password
+  no_log: true
+
+- name: Check whether the Grafana password is already a Podman secret
+  ansible.builtin.command: podman secret exists grafana_admin_password
+  args:
+    chdir: "/home/{{ monitoring_user }}"
+  become: true
+  become_user: "{{ monitoring_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ monitoring_uid.stdout }}"
+  register: monitoring_secret_exists
+  changed_when: false
+  failed_when: monitoring_secret_exists.rc not in [0, 1]
+
+- name: Store the Grafana admin password as a Podman secret
+  ansible.builtin.command: podman secret create grafana_admin_password -
+  args:
+    chdir: "/home/{{ monitoring_user }}"
+    stdin: "{{ monitoring_grafana_password.content | b64decode | trim }}"
+  changed_when: true
+  become: true
+  become_user: "{{ monitoring_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ monitoring_uid.stdout }}"
+  no_log: true
+  when: monitoring_secret_exists.rc != 0
+
+# --- Quadlet units --------------------------------------------------------------
+
+- name: Create the Quadlet directory for the monitoring user
+  ansible.builtin.file:
+    path: "/home/{{ monitoring_user }}/.config/containers/systemd"
+    state: directory
+    owner: "{{ monitoring_user }}"
+    group: "{{ monitoring_user }}"
+    mode: "0755"
+
+- name: Deploy the monitoring network Quadlet unit
+  ansible.builtin.template:
+    src: monitoring.network.j2
+    dest: "/home/{{ monitoring_user }}/.config/containers/systemd/monitoring.network"
+    owner: "{{ monitoring_user }}"
+    group: "{{ monitoring_user }}"
+    mode: "0644"
+    backup: true
+  register: monitoring_network_quadlet
+
+- name: Deploy the Prometheus, Loki and Grafana Quadlet units
+  ansible.builtin.template:
+    src: "{{ item }}.container.j2"
+    dest: "/home/{{ monitoring_user }}/.config/containers/systemd/{{ item }}.container"
+    owner: "{{ monitoring_user }}"
+    group: "{{ monitoring_user }}"
+    mode: "0644"
+    backup: true
+  loop:
+    - prometheus
+    - loki
+    - grafana
+  register: monitoring_quadlets
+
+- name: Reload the monitoring user's systemd units (picks up changed Quadlets)
+  ansible.builtin.systemd:
+    daemon_reload: true
+    scope: user
+  become: true
+  become_user: "{{ monitoring_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ monitoring_uid.stdout }}"
+  when: monitoring_network_quadlet.changed or monitoring_quadlets.changed
+
+# A service is restarted when its unit or config changed, otherwise just
+# started (a no-op if already running).
+- name: Start Prometheus
+  ansible.builtin.systemd:
+    name: prometheus.service
+    scope: user
+    state: "{{ 'restarted' if (monitoring_prometheus_config.changed or (monitoring_quadlets.results[0].changed | default(false))) else 'started' }}"
+    enabled: true
+  become: true
+  become_user: "{{ monitoring_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ monitoring_uid.stdout }}"
+
+- name: Start Loki
+  ansible.builtin.systemd:
+    name: loki.service
+    scope: user
+    state: "{{ 'restarted' if (monitoring_loki_config.changed or (monitoring_quadlets.results[1].changed | default(false))) else 'started' }}"
+    enabled: true
+  become: true
+  become_user: "{{ monitoring_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ monitoring_uid.stdout }}"
+
+- name: Work out whether Grafana needs a restart
+  ansible.builtin.set_fact:
+    monitoring_grafana_restart: >-
+      {{ monitoring_grafana_datasources.changed or monitoring_grafana_provider.changed
+         or (monitoring_quadlets.results[2].changed | default(false)) }}
+
+- name: Start Grafana
+  ansible.builtin.systemd:
+    name: grafana.service
+    scope: user
+    state: "{{ 'restarted' if monitoring_grafana_restart | bool else 'started' }}"
+    enabled: true
+  become: true
+  become_user: "{{ monitoring_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ monitoring_uid.stdout }}"
+
+# The Pushgateway, the Podman exporters and the Alloy host agent.
+- name: Set up the monitoring agents
+  ansible.builtin.include_tasks: agents.yml

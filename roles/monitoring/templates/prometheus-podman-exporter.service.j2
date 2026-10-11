@@ -1,0 +1,16 @@
+# Managed by Ansible (roles/monitoring). A plain systemd *user* service (not a
+# container): it reads {{ item.user }}'s own rootless Podman through that user's API
+# socket (podman.socket), so no socket has to be mounted into a container and
+# no SELinux relaxation is needed. Listens on loopback only.
+[Unit]
+Description=Prometheus exporter for {{ item.user }}'s rootless Podman
+Wants=podman.socket
+After=podman.socket network-online.target
+
+[Service]
+ExecStart=/usr/bin/prometheus-podman-exporter --web.listen-address=127.0.0.1:{{ item.port }} --collector.pod
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

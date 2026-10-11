@@ -1,12 +1,26 @@
 [Unit]
 Description=Forgejo Actions runner (rootless)
-After=network-online.target forgejo.service
-Wants=network-online.target
+After=network-online.target forgejo.service podman.socket
+Wants=network-online.target podman.socket
 Requires=forgejo.service
 
 [Container]
 Image={{ forgejo_runner_image }}
 ContainerName=forgejo-runner
+# Container root == the host '{{ forgejo_user }}' user under rootless Podman. The runner image
+# defaults to a non-root uid, which maps to an unrelated subuid on the host and
+# then cannot read the 0600 config.yml or use the 0660 podman socket below.
+User=0
+# SELinux (Fedora's default) blocks ordinary containers from connecting to a
+# mounted podman socket ("permission denied ... docker.sock"). By default the
+# label confinement of this ONE container is disabled (it then runs as spc_t),
+# which is the usual recipe. Set forgejo_runner_selinux_type (group_vars) to a
+# specific type, e.g. container_runtime_t, to try a tighter domain instead.
+{% if forgejo_runner_selinux_type | length > 0 %}
+SecurityLabelType={{ forgejo_runner_selinux_type }}
+{% else %}
+SecurityLabelDisable=true
+{% endif %}
 AutoUpdate=registry
 Network={{ forgejo_network_name }}.network
 Volume={{ forgejo_runner_data_dir }}:/data:Z

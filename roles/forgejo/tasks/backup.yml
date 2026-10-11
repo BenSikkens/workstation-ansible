@@ -1,0 +1,226 @@
+---
+# Safety net for an EXISTING Forgejo install: before this role changes
+# anything, snapshot what is already there so a failed run can be rolled back
+# with `ansible-playbook forgejo-backup.yml` (see that playbook and the README).
+#
+# What happens, in order:
+#   1. If there is no Forgejo data yet (fresh machine) nothing is backed up.
+#   2. If an earlier run never reached its "success" marker, the backup taken
+#      back then is KEPT as the restore point and no new snapshot is made: a
+#      snapshot of a half-installed state would be worthless.
+#   3. Otherwise Forgejo and its runner are stopped (a copy of live SQLite
+#      files and git repos is not consistent), the data dir, runner data dir
+#      and Quadlet units are archived with numeric ownership, and a manifest
+#      is written with status "pending".
+#   4. The role starts the services again as part of its normal flow, and
+#      backup_outcome.yml flips the manifest to "success" once Forgejo and the
+#      runner are verified healthy. If the play dies before that, the manifest
+#      stays "pending", which is what tells forgejo-backup.yml to restore.
+#
+# The backup root is root-only (0700) because the archive holds repositories,
+# the database and the runner secret.
+
+- name: Create the backup root
+  ansible.builtin.file:
+    path: "{{ forgejo_backup_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Look for a manifest left by an earlier run
+  ansible.builtin.stat:
+    path: "{{ forgejo_backup_dir }}/manifest.yml"
+  register: forgejo_backup_manifest_stat
+
+- name: Read the earlier manifest
+  ansible.builtin.slurp:
+    src: "{{ forgejo_backup_dir }}/manifest.yml"
+  register: forgejo_backup_prev_raw
+  when: forgejo_backup_manifest_stat.stat.exists
+
+- name: Note whether an earlier run is still unfinished
+  ansible.builtin.set_fact:
+    forgejo_backup_prev: >-
+      {{ (forgejo_backup_prev_raw.content | b64decode | from_yaml)
+         if forgejo_backup_manifest_stat.stat.exists else {} }}
+
+- name: Work out which backup paths exist
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ forgejo_backup_paths }}"
+  register: forgejo_backup_path_stats
+
+- name: Look for existing Forgejo data
+  ansible.builtin.find:
+    paths: "{{ forgejo_data_dir }}"
+    file_type: any
+    recurse: false
+  register: forgejo_existing_data
+  when: (forgejo_backup_path_stats.results | selectattr('item', 'equalto', forgejo_data_dir) | first).stat.exists
+
+- name: Decide whether a backup is needed
+  ansible.builtin.set_fact:
+    forgejo_backup_existing_paths: >-
+      {{ forgejo_backup_path_stats.results | selectattr('stat.exists') | map(attribute='item') | list }}
+    forgejo_backup_unfinished: "{{ forgejo_backup_prev.get('status', '') == 'pending' }}"
+    forgejo_has_data: "{{ (forgejo_existing_data.matched | default(0)) > 0 }}"
+
+- name: Keep the earlier restore point (previous run never finished)
+  ansible.builtin.debug:
+    msg: >-
+      A previous run did not finish, so the backup from
+      {{ forgejo_backup_prev.get('created', 'an earlier run') }} stays the restore point
+      and no new backup is taken. Run `ansible-playbook forgejo-backup.yml` to
+      roll back, or let this run finish to mark it successful.
+  when:
+    - forgejo_backup_enabled | bool
+    - forgejo_backup_unfinished
+
+- name: Track the earlier restore point through this run
+  ansible.builtin.set_fact:
+    forgejo_backup_active: true
+    forgejo_backup_manifest: "{{ forgejo_backup_prev }}"
+  when:
+    - forgejo_backup_enabled | bool
+    - forgejo_backup_unfinished
+
+- name: Report that there is nothing to back up
+  ansible.builtin.debug:
+    msg: "No existing Forgejo data in {{ forgejo_data_dir }}; skipping backup (fresh install)."
+  when:
+    - forgejo_backup_enabled | bool
+    - not forgejo_backup_unfinished
+    - not forgejo_has_data
+
+- name: Back up the existing Forgejo install
+  when:
+    - forgejo_backup_enabled | bool
+    - not forgejo_backup_unfinished
+    - forgejo_has_data
+  block:
+    - name: Measure the data to be backed up
+      ansible.builtin.command:
+        argv: "{{ ['du', '-sbc'] + forgejo_backup_existing_paths }}"
+      register: forgejo_backup_du
+      changed_when: false
+
+    - name: Measure free space in the backup root
+      ansible.builtin.command:
+        argv: ['df', '--output=avail', '-B1', "{{ forgejo_backup_dir }}"]
+      register: forgejo_backup_df
+      changed_when: false
+
+    - name: Make sure the archive will fit
+      ansible.builtin.assert:
+        that:
+          - (forgejo_backup_df.stdout_lines | last | trim | int) > (forgejo_backup_du.stdout_lines | last).split()[0] | int
+        fail_msg: >-
+          Not enough free space in {{ forgejo_backup_dir }} for a backup
+          ({{ (forgejo_backup_du.stdout_lines | last).split()[0] }} bytes of data,
+          {{ forgejo_backup_df.stdout_lines | last | trim }} bytes free). Nothing has been changed.
+          Free some space, point forgejo_backup_dir elsewhere, or set
+          forgejo_backup_enabled: false.
+        quiet: true
+
+    - name: Check whether {{ forgejo_user }} exists yet
+      ansible.builtin.command: "id -u {{ forgejo_user }}"
+      register: forgejo_backup_uid
+      changed_when: false
+      failed_when: false
+
+    # Stopped so SQLite and the git repos are quiet while they are copied.
+    # failed_when is off: the units may simply not be installed or running.
+    - name: Stop the Forgejo stack for a consistent copy
+      ansible.builtin.command: "systemctl --user stop forgejo-runner.service forgejo.service"
+      become: true
+      become_user: "{{ forgejo_user }}"
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_backup_uid.stdout }}"
+      changed_when: false
+      failed_when: false
+      when: forgejo_backup_uid.rc == 0
+
+    - name: Set the name of this backup
+      ansible.builtin.set_fact:
+        forgejo_backup_stamp: "{{ ansible_facts['date_time']['iso8601_basic_short'] }}"
+
+    - name: Create the backup directory
+      ansible.builtin.file:
+        path: "{{ forgejo_backup_dir }}/{{ forgejo_backup_stamp }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Archive the existing install
+      ansible.builtin.command:
+        argv: >-
+          {{ ['tar', '--numeric-owner', '-czpf',
+              forgejo_backup_dir ~ '/' ~ forgejo_backup_stamp ~ '/forgejo-backup.tar.gz',
+              '-C', '/']
+             + (forgejo_backup_existing_paths | map('regex_replace', '^/', '') | list) }}
+      changed_when: true
+
+    - name: Checksum the archive
+      ansible.builtin.stat:
+        path: "{{ forgejo_backup_dir }}/{{ forgejo_backup_stamp }}/forgejo-backup.tar.gz"
+        checksum_algorithm: sha256
+      register: forgejo_backup_archive
+
+    - name: Remember the manifest for the end of the role
+      ansible.builtin.set_fact:
+        forgejo_backup_active: true
+        forgejo_backup_manifest:
+          status: pending
+          created: "{{ forgejo_backup_stamp }}"
+          forgejo_user: "{{ forgejo_user }}"
+          backup_root: "{{ forgejo_backup_dir }}"
+          backup_dir: "{{ forgejo_backup_dir }}/{{ forgejo_backup_stamp }}"
+          archive: "{{ forgejo_backup_dir }}/{{ forgejo_backup_stamp }}/forgejo-backup.tar.gz"
+          sha256: "{{ forgejo_backup_archive.stat.checksum }}"
+          size_bytes: "{{ forgejo_backup_archive.stat.size }}"
+          paths: "{{ forgejo_backup_existing_paths }}"
+
+    - name: Record the backup in the manifest
+      ansible.builtin.copy:
+        dest: "{{ forgejo_backup_dir }}/manifest.yml"
+        owner: root
+        group: root
+        mode: "0600"
+        content: "{{ forgejo_backup_manifest | to_nice_yaml }}"
+
+    - name: Report the backup
+      ansible.builtin.debug:
+        msg: >-
+          Backed up {{ forgejo_backup_existing_paths | length }} path(s) to
+          {{ forgejo_backup_dir }}/{{ forgejo_backup_stamp }}/forgejo-backup.tar.gz
+          ({{ forgejo_backup_archive.stat.size }} bytes).
+
+  rescue:
+    # A half-written archive is useless and must not be mistaken for a restore
+    # point; bring the stack back up since the install has not touched it yet.
+    - name: Discard the incomplete backup
+      ansible.builtin.file:
+        path: "{{ forgejo_backup_dir }}/{{ forgejo_backup_stamp }}"
+        state: absent
+      when: forgejo_backup_stamp is defined
+
+    - name: Start the Forgejo stack again
+      ansible.builtin.command: "systemctl --user start forgejo.service forgejo-runner.service"
+      become: true
+      become_user: "{{ forgejo_user }}"
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ forgejo_backup_uid.stdout }}"
+      changed_when: false
+      failed_when: false
+      when:
+        - forgejo_backup_uid is defined
+        - forgejo_backup_uid.rc | default(1) == 0
+
+    - name: Stop before changing anything
+      ansible.builtin.fail:
+        msg: >-
+          The pre-install backup failed, so the install was stopped before it
+          changed anything. Fix the error above, or set forgejo_backup_enabled:
+          false in group_vars/all.yml to skip backups.

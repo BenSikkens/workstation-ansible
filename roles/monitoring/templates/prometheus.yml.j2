@@ -1,0 +1,10 @@
+# Managed by Ansible (roles/monitoring). Prometheus only scrapes itself;
+# everything else arrives through remote write from Grafana Alloy.
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

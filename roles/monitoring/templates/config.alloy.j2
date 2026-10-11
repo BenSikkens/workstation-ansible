@@ -1,0 +1,87 @@
+// Managed by Ansible (roles/monitoring). Local edits are overwritten on the
+// next playbook run; a timestamped backup is kept.
+//
+// One agent for the whole workstation. It sends:
+//   * host metrics (CPU, memory, disk, network)          -> Prometheus
+//   * per-container metrics from each Podman exporter    -> Prometheus
+//   * CI scan results held by the Pushgateway            -> Prometheus
+//   * the systemd journal (incl. container logs)         -> Loki
+// Everything stays on 127.0.0.1.
+
+prometheus.remote_write "local" {
+  endpoint {
+    url = "http://127.0.0.1:{{ monitoring_prometheus_port }}/api/v1/write"
+  }
+}
+
+// --- host metrics (embedded node_exporter) ---
+prometheus.exporter.unix "host" {
+  netdev {
+    device_exclude = "^(veth.*|podman.*|cni.*|br-.*|lo)$"
+  }
+}
+
+prometheus.scrape "host" {
+  targets    = prometheus.exporter.unix.host.targets
+  forward_to = [prometheus.remote_write.local.receiver]
+}
+
+// --- rootless Podman containers, one exporter per user ---
+prometheus.scrape "podman" {
+  targets = [
+{% for e in monitoring_podman_exporters %}
+    {"__address__" = "127.0.0.1:{{ e.port }}", "podman_user" = "{{ e.user }}"},
+{% endfor %}
+  ]
+  scrape_interval = "30s"
+  forward_to      = [prometheus.remote_write.local.receiver]
+}
+
+// --- CI scan results pushed by workflows ---
+prometheus.scrape "pushgateway" {
+  targets      = [{"__address__" = "127.0.0.1:{{ monitoring_pushgateway_port }}"}]
+  honor_labels = true
+  forward_to   = [prometheus.remote_write.local.receiver]
+}
+
+// --- logs from the systemd journal (system, user services, containers) ---
+loki.relabel "journal" {
+  forward_to = []
+
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "unit"
+  }
+  // Quadlet containers run as *user* services; they carry _SYSTEMD_USER_UNIT
+  // instead, so it takes over the `unit` label when present.
+  rule {
+    source_labels = ["__journal__systemd_user_unit"]
+    regex         = "(.+)"
+    target_label  = "unit"
+  }
+  rule {
+    source_labels = ["__journal_container_name"]
+    target_label  = "container"
+  }
+  rule {
+    source_labels = ["__journal_priority_keyword"]
+    target_label  = "level"
+  }
+  rule {
+    source_labels = ["__journal__hostname"]
+    target_label  = "host"
+  }
+}
+
+loki.source.journal "journal" {
+  forward_to    = [loki.write.local.receiver]
+  relabel_rules = loki.relabel.journal.rules
+  labels        = {source = "journal"}
+  max_age       = "12h"
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://127.0.0.1:{{ monitoring_loki_port }}/loki/api/v1/push"
+  }
+}

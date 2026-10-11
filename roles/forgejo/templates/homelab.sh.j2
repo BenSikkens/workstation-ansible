@@ -1,0 +1,100 @@
+# homelab — start, stop and inspect the self-hosted Forgejo stack.
+#
+#   homelab up       start Forgejo and its Actions runner
+#   homelab down     stop them, plus any CI containers left behind
+#   homelab status   show what is running
+#
+# The stack runs as rootless Podman containers under the '{{ forgejo_user }}' user, so
+# this uses sudo to reach that user's systemd instance.
+#
+# Managed by Ansible (roles/forgejo/templates/homelab.sh.j2). Local edits are
+# overwritten on the next playbook run; a timestamped backup is kept.
+
+HOMELAB_FORGEJO_USER="{{ forgejo_user }}"
+HOMELAB_WEB_URL="http://localhost:{{ forgejo_http_port }}"
+{% raw %}
+# Units shown by `homelab status`. The first two decide the overall verdict;
+# podman.socket is the API socket the runner uses to start job containers.
+_HOMELAB_UNITS=(forgejo.service forgejo-runner.service podman.socket)
+
+# Run a command as the stack's user with its systemd instance reachable.
+# The subshell `cd /` matters: rootless podman fails when the working
+# directory (e.g. your home) is not readable by the other user.
+_homelab_as_stack_user() {
+  local uid
+  uid=$(id -u "$HOMELAB_FORGEJO_USER") || {
+    echo "homelab: user '$HOMELAB_FORGEJO_USER' does not exist" >&2
+    return 1
+  }
+  ( cd / && sudo -u "$HOMELAB_FORGEJO_USER" env XDG_RUNTIME_DIR="/run/user/${uid}" "$@" )
+}
+
+_homelab_ctl() {
+  _homelab_as_stack_user systemctl --user "$@"
+}
+
+_homelab_status() {
+  local -a states=()
+  local i state running=0
+  # One sudo call for all units; is-active prints one state per line.
+  mapfile -t states < <(_homelab_ctl is-active "${_HOMELAB_UNITS[@]}" 2>/dev/null)
+
+  for i in "${!_HOMELAB_UNITS[@]}"; do
+    state="${states[$i]:-unavailable}"
+    # Only the first two units (forgejo, forgejo-runner) count toward the verdict.
+    if [ "$i" -lt 2 ] && [ "$state" = active ]; then
+      running=$((running + 1))
+    fi
+    states[i]="$state"
+  done
+
+  local verdict code
+  if [ "$running" -eq 2 ]; then
+    verdict=running code=0
+  elif [ "$running" -eq 0 ]; then
+    verdict=stopped code=3
+  else
+    verdict=degraded code=1
+  fi
+
+  echo "Forgejo stack: $verdict"
+  for i in "${!_HOMELAB_UNITS[@]}"; do
+    printf '  %-24s %s\n' "${_HOMELAB_UNITS[$i]}" "${states[$i]}"
+  done
+  [ "$verdict" = running ] && echo "  Web UI: $HOMELAB_WEB_URL"
+  return "$code"
+}
+
+_homelab_up() {
+  echo "Starting Forgejo stack..."
+  if ! _homelab_ctl start podman.socket forgejo.service forgejo-runner.service; then
+    echo "homelab: failed to start the stack; see 'homelab status'" >&2
+    return 1
+  fi
+  _homelab_status
+}
+
+_homelab_down() {
+  echo "Stopping Forgejo stack..."
+  _homelab_ctl stop forgejo-runner.service forgejo.service || return 1
+  # CI job containers are started through the podman socket and can outlive
+  # the runner if it was stopped mid-job; this user runs nothing else.
+  _homelab_as_stack_user podman stop --all --time 10 >/dev/null 2>&1
+  _homelab_ctl stop podman.socket podman.service >/dev/null 2>&1
+  _homelab_status
+}
+
+homelab() {
+  case "${1:-}" in
+    up)     _homelab_up ;;
+    down)   _homelab_down ;;
+    status) _homelab_status ;;
+    *)
+      echo "Usage: homelab {up|down|status}" >&2
+      return 2
+      ;;
+  esac
+}
+
+complete -W "up down status" homelab
+{% endraw %}

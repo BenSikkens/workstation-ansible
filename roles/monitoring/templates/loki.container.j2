@@ -1,0 +1,21 @@
+[Unit]
+Description=Loki (log database)
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image={{ monitoring_loki_image }}
+ContainerName=loki
+AutoUpdate=registry
+Network=monitoring.network
+PublishPort=127.0.0.1:{{ monitoring_loki_port }}:3100
+Volume=loki-data:/loki:U
+Volume={{ monitoring_config_dir }}/loki-config.yml:/etc/loki/config.yml:ro,Z
+Exec=-config.file=/etc/loki/config.yml
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

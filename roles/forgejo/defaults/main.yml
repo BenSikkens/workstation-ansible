@@ -1,6 +1,10 @@
 ---
 forgejo_user: git
-forgejo_image: "codeberg.org/forgejo/forgejo:10"
+# Pinned to the major version your existing database was written by. Forgejo
+# refuses to start on a database from a NEWER release ("migration version N is
+# for a newer version of Forgejo"), so never lower this on an existing install;
+# raising it migrates the database forward, which cannot be undone.
+forgejo_image: "codeberg.org/forgejo/forgejo:16"
 forgejo_data_dir: "/home/{{ forgejo_user }}/forgejo-data"
 forgejo_http_port: 3000
 forgejo_ssh_port: 2222
@@ -10,14 +14,61 @@ forgejo_network_name: forgejo
 # user). Registered via Forgejo's "offline registration" CLI flow, which is
 # built for scripted/IaC setups like this one and needs no web-UI click-through.
 #
-# NOTE: no numeric tag has been pinned here (unlike forgejo_image) because
-# the runner's registry (code.forgejo.org) uses a tagging scheme this role
-# hasn't verified against a specific stable release at write time. Check
-# https://code.forgejo.org/forgejo/-/packages/container/runner for a current
-# version tag and pin it once you've confirmed one, the same way forgejo_image is pinned.
-forgejo_runner_image: "code.forgejo.org/forgejo/runner:latest"
-forgejo_runner_name: "{{ ansible_hostname }}"
+# Pinned to runner major version 13 (the newest major tag on the registry when
+# this was written; 12.x and 13.x tags exist). The `server.connections` login
+# format that runner-config.yml.j2 writes is documented for current runners
+# (see https://forgejo.org/docs/v16.0/admin/actions/registration/); the old
+# runner:6 predates it. Bump deliberately; tags:
+#   curl -s https://code.forgejo.org/v2/forgejo/runner/tags/list
+forgejo_runner_image: "code.forgejo.org/forgejo/runner:13"
+forgejo_runner_name: "{{ ansible_facts['hostname'] }}"
+# Labels a workflow can target with `runs-on:`. `ubuntu-latest` is included
+# because existing workflows from the earlier hand-made runner used it (there
+# it ran on the "host" executor inside the runner container); here it runs in a
+# throwaway node container instead, which is isolated and has git + node. If a
+# workflow genuinely needs the runner container itself, use
+# "ubuntu-latest:host" instead.
 forgejo_runner_labels:
   - "docker:docker://node:22-bookworm"
+  - "ubuntu-latest:docker://node:22-bookworm"
 forgejo_runner_scope: ""  # empty = instance-wide; or an org/user/repo name to scope it
 forgejo_runner_data_dir: "/home/{{ forgejo_user }}/forgejo-runner-data"
+
+# --- CI scanner image (semgrep, gitleaks, trivy) ----------------------------
+# Jobs run in throwaway containers, so tools installed on the host are
+# invisible to them. Instead the role builds one local image (node base, so
+# actions/checkout works) with the enabled scanners baked in and registers it
+# as the runner label `forgejo_ci_label`; a workflow opts in with
+# `runs-on: scan`.
+#
+# The three toggles below are the fallback values; the user-facing copy lives
+# in group_vars/all.yml and wins over these.
+forgejo_runner_install_semgrep: true
+forgejo_runner_install_gitleaks: true
+forgejo_runner_install_trivy: true
+forgejo_ci_image_enabled: "{{ forgejo_runner_install_semgrep or forgejo_runner_install_gitleaks or forgejo_runner_install_trivy }}"
+forgejo_ci_label: scan
+forgejo_ci_image_name: "localhost/forgejo-ci:latest"
+forgejo_ci_build_dir: "/home/{{ forgejo_user }}/forgejo-ci-image"
+forgejo_ci_base_image: "docker.io/library/node:22-bookworm"
+# gitleaks and trivy are static Go binaries, copied straight out of their
+# official images (binary paths checked against upstream's Dockerfiles).
+# Semgrep has no standalone binary, so it is pip-installed into a venv.
+forgejo_gitleaks_image: "docker.io/zricethezav/gitleaks:latest"
+forgejo_trivy_image: "docker.io/aquasec/trivy:latest"
+
+# --- Backup before changing an existing install (see tasks/backup.yml) -------
+# The user-facing toggle lives in group_vars/all.yml. Archives go in a
+# root-only directory; forgejo-backup.yml restores or removes them.
+forgejo_backup_enabled: true
+forgejo_backup_dir: /var/backups/forgejo
+forgejo_backup_paths:
+  - "{{ forgejo_data_dir }}"
+  - "{{ forgejo_runner_data_dir }}"
+  - "/home/{{ forgejo_user }}/.config/containers/systemd"
+
+# SELinux domain for the runner container, which needs to reach the podman
+# socket. Empty = disable label confinement for it (known to work; same as
+# spc_t). Try "container_runtime_t" for a narrower domain; if the runner then
+# fails with "permission denied ... docker.sock", check `ausearch -m avc`.
+forgejo_runner_selinux_type: ""

@@ -1,0 +1,23 @@
+---
+# Installs the DevPod CLI (https://devpod.sh) from upstream's GitHub
+# releases — there's no Fedora package. This installs the CLI only, not
+# the separate Desktop GUI app (upstream dropped deb/rpm packaging for
+# that and now ships it as an AppImage with extra runtime deps —
+# fuse2, libfribidi, mesa GL libs — which is enough extra machinery that
+# it's left out here; ask if you also want that added).
+#
+# DevPod itself still needs a provider configured before first use (e.g.
+# `devpod provider add docker`, which works against this box's existing
+# rootless Podman too via its docker-compatible socket) — that's a
+# one-time interactive choice this role deliberately leaves to you rather
+# than deciding on your behalf.
+
+- name: Map CPU architecture to DevPod's release asset naming
+  ansible.builtin.set_fact:
+    devpod_arch: "{{ 'arm64' if ansible_facts['architecture'] == 'aarch64' else 'amd64' }}"
+
+- name: Install the DevPod CLI
+  ansible.builtin.get_url:
+    url: "https://github.com/loft-sh/devpod/releases/latest/download/devpod-linux-{{ devpod_arch }}"
+    dest: "{{ devpod_install_path }}"
+    mode: "0755"

@@ -1,0 +1,30 @@
+[Unit]
+Description=Grafana (dashboards)
+After=network-online.target prometheus.service loki.service
+Wants=network-online.target prometheus.service loki.service
+
+[Container]
+Image={{ monitoring_grafana_image }}
+ContainerName=grafana
+AutoUpdate=registry
+Network=monitoring.network
+PublishPort=127.0.0.1:{{ monitoring_grafana_port }}:3000
+Volume=grafana-data:/var/lib/grafana:U
+Volume={{ monitoring_config_dir }}/grafana-provisioning:/etc/grafana/provisioning:ro,Z
+Volume={{ monitoring_config_dir }}/dashboards:/var/lib/grafana-dashboards:ro,Z
+Environment=GF_SERVER_ROOT_URL=http://localhost:{{ monitoring_grafana_port }}/
+Environment=GF_USERS_ALLOW_SIGN_UP=false
+Environment=GF_ANALYTICS_REPORTING_ENABLED=false
+Environment=GF_ANALYTICS_CHECK_FOR_UPDATES=false
+Environment=GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana-dashboards/security-scans.json
+Environment=GF_SECURITY_ADMIN_USER=admin
+# Generated once by the playbook; read it with:
+#   sudo cat /home/{{ monitoring_user }}/.grafana-admin-password
+Secret=grafana_admin_password,type=env,target=GF_SECURITY_ADMIN_PASSWORD
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

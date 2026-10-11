@@ -22,5 +22,10 @@
     - keepassxc
     - mkcert
     - forgejo
+    - role: monitoring
+      when: monitoring_enabled | default(false) | bool
     - obsidian
     - todotxt
+    - devpod
+    # Last: the `homelab` command needs to know which of the above got installed.
+    - homelab

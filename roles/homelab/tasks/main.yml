@@ -1,0 +1,53 @@
+---
+# Installs the `homelab` shell command (homelab up|down|status [forgejo|monitoring|all]) for
+# {{ desktop_user }} — the human at the keyboard, not the service accounts that run the containers.
+# account that runs the containers. Fedora's default ~/.bashrc already
+# sources every file in ~/.bashrc.d/, so the command goes there as a
+# drop-in instead of being appended to .bashrc itself. If .bashrc has lost
+# that loader, it is added back (with a backup of the original).
+#
+# The command only shows up in NEW shells; in an open terminal run
+#   source ~/.bashrc.d/homelab.sh
+
+- name: Create ~/.bashrc.d for {{ desktop_user }}
+  ansible.builtin.file:
+    path: "/home/{{ desktop_user }}/.bashrc.d"
+    state: directory
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0755"
+
+- name: Check whether ~/.bashrc already loads ~/.bashrc.d
+  ansible.builtin.command: grep -qs 'bashrc\.d' "/home/{{ desktop_user }}/.bashrc"
+  register: homelab_bashrc_loader
+  changed_when: false
+  failed_when: homelab_bashrc_loader.rc not in [0, 1, 2]  # 1 = no match, 2 = no .bashrc yet
+
+- name: Make ~/.bashrc load ~/.bashrc.d/* (only if it does not already)
+  ansible.builtin.blockinfile:
+    path: "/home/{{ desktop_user }}/.bashrc"
+    create: true
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0644"
+    backup: true
+    marker: "# {mark} ANSIBLE MANAGED BLOCK: bashrc.d loader"
+    block: |
+      if [ -d ~/.bashrc.d ]; then
+        for rc in ~/.bashrc.d/*; do
+          if [ -f "$rc" ]; then
+            . "$rc"
+          fi
+        done
+      fi
+      unset rc
+  when: homelab_bashrc_loader.rc != 0
+
+- name: Install the homelab command
+  ansible.builtin.template:
+    src: homelab.sh.j2
+    dest: "/home/{{ desktop_user }}/.bashrc.d/homelab.sh"
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0644"
+    backup: true

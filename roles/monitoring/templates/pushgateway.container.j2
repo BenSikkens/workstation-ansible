@@ -1,0 +1,23 @@
+# Managed by Ansible (roles/monitoring). Runs under '{{ forgejo_user | default('git') }}', on the same
+# network as Forgejo and its CI job containers, so workflows can reach it as
+# http://pushgateway:9091 (see the scan-report helper in the CI image).
+[Unit]
+Description=Prometheus Pushgateway (CI scan results)
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image={{ monitoring_pushgateway_image }}
+ContainerName=pushgateway
+AutoUpdate=registry
+Network={{ forgejo_network_name | default('forgejo') }}.network
+# Loopback only on the host: Alloy scrapes it there. It has no authentication,
+# so nothing outside this machine can reach it.
+PublishPort=127.0.0.1:{{ monitoring_pushgateway_port }}:9091
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

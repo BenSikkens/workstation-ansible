@@ -1,0 +1,44 @@
+---
+# Marks the install as successful in the backup manifest, but only after
+# Forgejo and its runner are verified healthy. Anything that fails earlier in
+# the play (or in this file) leaves the manifest at "pending", which is the
+# signal forgejo-backup.yml uses to roll back.
+#
+# Only runs when backup.yml produced or kept a restore point.
+
+- name: Wait for Forgejo to answer on its health endpoint
+  ansible.builtin.uri:
+    url: "http://localhost:{{ forgejo_http_port }}/api/healthz"
+    status_code: 200
+    use_proxy: false
+  register: forgejo_backup_health
+  until: (forgejo_backup_health.status | default(0)) == 200
+  retries: 30
+  delay: 5
+  when: forgejo_backup_active | default(false) | bool
+
+- name: Confirm the Forgejo and runner services are active
+  ansible.builtin.command: "systemctl --user is-active forgejo.service forgejo-runner.service"
+  become: true
+  become_user: "{{ forgejo_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ forgejo_uid.stdout }}"
+  register: forgejo_backup_active_check
+  until: (forgejo_backup_active_check.rc | default(1)) == 0
+  retries: 12
+  delay: 5
+  changed_when: false
+  when: forgejo_backup_active | default(false) | bool
+
+- name: Mark the install successful in the backup manifest
+  ansible.builtin.copy:
+    dest: "{{ forgejo_backup_dir }}/manifest.yml"
+    owner: root
+    group: root
+    mode: "0600"
+    content: >-
+      {{ forgejo_backup_manifest
+         | combine({'status': 'success',
+                    'completed': ansible_facts['date_time']['iso8601_basic_short']})
+         | to_nice_yaml }}
+  when: forgejo_backup_active | default(false) | bool

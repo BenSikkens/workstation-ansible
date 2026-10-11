@@ -1,0 +1,233 @@
+---
+# Restore or remove the Forgejo backup taken by `site.yml` (roles/forgejo/
+# tasks/backup.yml). Run it AFTER the install has finished or failed:
+#
+#   ansible-playbook forgejo-backup.yml --ask-become-pass
+#
+# What it does is decided by the outcome the install recorded in
+# <backup root>/manifest.yml:
+#
+#   status: success   the install finished and Forgejo + runner are healthy
+#                     -> the backup is REMOVED
+#   status: pending   the install died before it was verified
+#                     -> the backup is RESTORED
+#   status: restored  an earlier run of this playbook already rolled back
+#                     -> the backup is REMOVED
+#
+# Override the decision with -e backup_action=restore|remove (default: auto).
+# Anything destructive asks for confirmation first; skip the prompt with
+# -e backup_confirmed=true (needed when there is no terminal).
+#
+# Restoring never deletes the state it replaces: the broken data/runner/
+# Quadlet directories are renamed to <path>.failed-<timestamp> next to the
+# originals, so you can inspect or delete them yourself afterwards.
+#
+# If no manifest exists (fresh install, or backups disabled) there is
+# nothing to do and the playbook says so.
+
+- name: Restore or remove the Forgejo pre-install backup
+  hosts: workstation
+  become: true
+  gather_facts: true
+
+  vars:
+    backup_action: auto
+    backup_confirmed: false
+    # Same default as roles/forgejo/defaults; group_vars/all.yml may override it.
+    backup_root: "{{ forgejo_backup_dir | default('/var/backups/forgejo') }}"
+
+  tasks:
+    - name: Check the requested action
+      ansible.builtin.assert:
+        that: backup_action in ['auto', 'restore', 'remove']
+        fail_msg: "backup_action must be auto, restore or remove (got '{{ backup_action }}')."
+        quiet: true
+
+    - name: Look for the backup manifest
+      ansible.builtin.stat:
+        path: "{{ backup_root }}/manifest.yml"
+      register: backup_manifest_stat
+
+    - name: Nothing to do without a manifest
+      ansible.builtin.debug:
+        msg: >-
+          No backup manifest in {{ backup_root }}. Either this was a fresh install,
+          backups were disabled, or the backup has already been removed.
+      when: not backup_manifest_stat.stat.exists
+
+    - name: Stop here when there is no backup
+      ansible.builtin.meta: end_play
+      when: not backup_manifest_stat.stat.exists
+
+    - name: Read the manifest
+      ansible.builtin.slurp:
+        src: "{{ backup_root }}/manifest.yml"
+      register: backup_manifest_raw
+
+    - name: Decide what to do
+      ansible.builtin.set_fact:
+        backup_manifest: "{{ backup_manifest_raw.content | b64decode | from_yaml }}"
+        backup_plan: >-
+          {{ backup_action
+             if backup_action != 'auto'
+             else ('restore'
+                   if (backup_manifest_raw.content | b64decode | from_yaml).get('status') == 'pending'
+                   else 'remove') }}
+
+    - name: Show the plan
+      ansible.builtin.debug:
+        msg:
+          - "Install outcome recorded: {{ backup_manifest.get('status', 'unknown') }}"
+          - "Backup taken: {{ backup_manifest.get('created', 'unknown') }} ({{ backup_manifest.get('size_bytes', '?') }} bytes)"
+          - "Action: {{ backup_plan }}{{ ' (chosen automatically)' if backup_action == 'auto' else '' }}"
+          - "{{ 'Will replace these paths with their backed-up versions: ' ~ (backup_manifest.get('paths', []) | join(', ')) if backup_plan == 'restore' else 'Will delete the archive(s) under ' ~ backup_root }}"
+
+    # Restoring always asks; removing only asks if the install did NOT succeed,
+    # because then the archive may be the only good copy there is.
+    - name: Ask for confirmation
+      ansible.builtin.pause:
+        prompt: "Type 'yes' to {{ backup_plan }} the Forgejo backup (anything else aborts)"
+      register: backup_answer
+      when:
+        - not (backup_confirmed | bool)
+        - backup_plan == 'restore' or backup_manifest.get('status') == 'pending'
+
+    - name: Abort unless confirmed
+      ansible.builtin.fail:
+        msg: "Aborted; nothing was changed."
+      when:
+        - backup_answer is not skipped
+        - backup_answer.user_input | default('') | trim | lower != 'yes'
+
+    # ---------------------------------------------------------------- restore
+    - name: Restore the backup
+      when: backup_plan == 'restore'
+      block:
+        - name: Make sure the archive is still there
+          ansible.builtin.stat:
+            path: "{{ backup_manifest.archive }}"
+            checksum_algorithm: sha256
+          register: backup_archive
+
+        - name: Verify the archive before touching anything
+          ansible.builtin.assert:
+            that:
+              - backup_archive.stat.exists
+              - backup_archive.stat.checksum == backup_manifest.sha256
+            fail_msg: >-
+              The archive {{ backup_manifest.archive }} is missing or does not match
+              the checksum recorded when it was made. Nothing was changed.
+            quiet: true
+
+        - name: Check that the archive can be read end to end
+          ansible.builtin.command:
+            argv: ['tar', '-tzf', "{{ backup_manifest.archive }}"]
+          changed_when: false
+          register: backup_listing
+
+        - name: Look up the service user's uid
+          ansible.builtin.command: "id -u {{ backup_manifest.forgejo_user }}"
+          register: backup_uid
+          changed_when: false
+          failed_when: false
+
+        - name: Stop the Forgejo stack
+          ansible.builtin.command: "systemctl --user stop forgejo-runner.service forgejo.service"
+          become: true
+          become_user: "{{ backup_manifest.forgejo_user }}"
+          environment:
+            XDG_RUNTIME_DIR: "/run/user/{{ backup_uid.stdout }}"
+          changed_when: false
+          failed_when: false
+          when: backup_uid.rc == 0
+
+        - name: Set the suffix for the state being replaced
+          ansible.builtin.set_fact:
+            backup_aside_suffix: ".failed-{{ ansible_facts['date_time']['iso8601_basic_short'] }}"
+
+        # `removes` makes this a no-op for paths that do not exist (for example
+        # a runner directory the failed install created but the backup lacks).
+        - name: Move the current (broken) state aside
+          ansible.builtin.command:
+            argv: ['mv', "{{ item }}", "{{ item }}{{ backup_aside_suffix }}"]
+            removes: "{{ item }}"
+          loop: "{{ backup_manifest.paths }}"
+
+        - name: Unpack the backup
+          ansible.builtin.command:
+            argv: ['tar', '--numeric-owner', '-xpf', "{{ backup_manifest.archive }}", '-C', '/']
+          changed_when: true
+
+        - name: Reload the service user's systemd units
+          ansible.builtin.command: "systemctl --user daemon-reload"
+          become: true
+          become_user: "{{ backup_manifest.forgejo_user }}"
+          environment:
+            XDG_RUNTIME_DIR: "/run/user/{{ backup_uid.stdout }}"
+          changed_when: false
+          failed_when: false
+          when: backup_uid.rc == 0
+
+        # The runner unit may not exist in an older backup; a failure here is
+        # reported below rather than aborting a restore that has succeeded.
+        - name: Start the restored Forgejo stack
+          ansible.builtin.command: "systemctl --user start forgejo.service forgejo-runner.service"
+          become: true
+          become_user: "{{ backup_manifest.forgejo_user }}"
+          environment:
+            XDG_RUNTIME_DIR: "/run/user/{{ backup_uid.stdout }}"
+          register: backup_start
+          changed_when: false
+          failed_when: false
+          when: backup_uid.rc == 0
+
+        - name: Record the restore in the manifest
+          ansible.builtin.copy:
+            dest: "{{ backup_root }}/manifest.yml"
+            owner: root
+            group: root
+            mode: "0600"
+            content: >-
+              {{ backup_manifest
+                 | combine({'status': 'restored',
+                            'restored': ansible_facts['date_time']['iso8601_basic_short']})
+                 | to_nice_yaml }}
+
+        - name: Report the restore
+          ansible.builtin.debug:
+            msg:
+              - "Restored {{ backup_manifest.paths | length }} path(s) from {{ backup_manifest.archive }}."
+              - "The state that was replaced is still on disk as <path>{{ backup_aside_suffix }} for each of: {{ backup_manifest.paths | join(', ') }}. Delete those when you no longer need them."
+              - "{{ 'Forgejo and the runner were started again.' if (backup_start.rc | default(1)) == 0 else 'Could not start the services automatically; check: sudo -u ' ~ backup_manifest.forgejo_user ~ ' systemctl --user status forgejo' }}"
+              - "The archive is kept. Re-run site.yml once the problem is fixed, then run this playbook again to clean up."
+
+    # ----------------------------------------------------------------- remove
+    - name: Remove the backup
+      when: backup_plan == 'remove'
+      block:
+        # Every dated backup directory, not just the one in the manifest, so
+        # backups superseded by later successful runs do not pile up.
+        - name: Find dated backup directories
+          ansible.builtin.find:
+            paths: "{{ backup_root }}"
+            file_type: directory
+            use_regex: true
+            patterns: '^[0-9]{8}T[0-9]{6}$'
+          register: backup_dirs
+
+        - name: Delete the backup directories
+          ansible.builtin.file:
+            path: "{{ item.path }}"
+            state: absent
+          loop: "{{ backup_dirs.files }}"
+          loop_control:
+            label: "{{ item.path }}"
+
+        - name: Delete the manifest
+          ansible.builtin.file:
+            path: "{{ backup_root }}/manifest.yml"
+            state: absent
+
+        - name: Report the removal
+          ansible.builtin.debug:
+            msg: "Removed {{ backup_dirs.files | length }} backup(s) from {{ backup_root }}."
