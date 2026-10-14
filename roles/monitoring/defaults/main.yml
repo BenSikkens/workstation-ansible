@@ -16,6 +16,7 @@ monitoring_pushgateway_image: "docker.io/prom/pushgateway:v1.11.4"
 
 # Host ports, all bound to 127.0.0.1. Forgejo itself uses 3000 and 2222.
 monitoring_grafana_port: 3001
+# Not 9090: Fedora Workstation runs Cockpit there.
 monitoring_prometheus_port: 9094
 monitoring_loki_port: 3100
 monitoring_pushgateway_port: 9091
@@ -27,8 +28,11 @@ monitoring_loki_retention: 336h   # 14 days
 # One prometheus-podman-exporter per user whose rootless containers should be
 # graphed: the service user (Forgejo, runner, CI job containers) and the
 # desktop user (Podman Desktop). Each listens on its own loopback port.
+monitoring_forgejo_user: "{{ forgejo_user | default('git') }}"
+# Podman users whose containers are graphed. A user without Podman containers
+# simply shows nothing.
 monitoring_podman_exporters:
-  - user: "{{ forgejo_user | default('git') }}"
+  - user: "{{ monitoring_forgejo_user }}"
     port: 9882
   - user: "{{ desktop_user }}"
     port: 9883

@@ -29,7 +29,7 @@ prometheus.scrape "host" {
 // --- rootless Podman containers, one exporter per user ---
 prometheus.scrape "podman" {
   targets = [
-{% for e in monitoring_podman_exporters %}
+{% for e in monitoring_exporters_active %}
     {"__address__" = "127.0.0.1:{{ e.port }}", "podman_user" = "{{ e.user }}"},
 {% endfor %}
   ]
@@ -37,6 +37,7 @@ prometheus.scrape "podman" {
   forward_to      = [prometheus.remote_write.local.receiver]
 }
 
+{% if monitoring_pushgateway_enabled | default(false) | bool %}
 // --- CI scan results pushed by workflows ---
 prometheus.scrape "pushgateway" {
   targets      = [{"__address__" = "127.0.0.1:{{ monitoring_pushgateway_port }}"}]
@@ -44,6 +45,7 @@ prometheus.scrape "pushgateway" {
   forward_to   = [prometheus.remote_write.local.receiver]
 }
 
+{% endif %}
 // --- logs from the systemd journal (system, user services, containers) ---
 loki.relabel "journal" {
   forward_to = []

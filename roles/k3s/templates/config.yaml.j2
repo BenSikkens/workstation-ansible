@@ -1,0 +1,19 @@
+# Managed by Ansible (roles/k3s). Local edits are overwritten on the next run;
+# put extra settings in k3s_config_extra instead.
+# Reference: https://docs.k3s.io/installation/configuration
+write-kubeconfig-mode: "0600"
+cluster-cidr: "{{ k3s_cluster_cidr }}"
+service-cidr: "{{ k3s_service_cidr }}"
+{% if k3s_selinux | bool %}
+# Fedora runs SELinux enforcing; this makes containerd use the k3s-selinux policy.
+selinux: true
+{% endif %}
+{% if k3s_disable | length > 0 %}
+disable:
+{% for item in k3s_disable %}
+  - {{ item }}
+{% endfor %}
+{% endif %}
+{% if k3s_config_extra | length > 0 %}
+{{ k3s_config_extra | to_nice_yaml }}
+{% endif %}

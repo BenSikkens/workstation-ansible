@@ -1,0 +1,44 @@
+---
+# Makes sure ~/.bashrc loads every file in ~/.bashrc.d/ for {{ desktop_user }}, so
+# other roles (homelab, k3s) can ship shell commands as small drop-ins.
+# Fedora's default ~/.bashrc already does this; if it has lost the loader it is
+# added back (with a backup of the original ~/.bashrc, which is in ~ and so is
+# not itself loaded).
+#
+# Roles that write into ~/.bashrc.d must NOT use `backup: true`: every file in
+# that directory is sourced, so a backup copy would be loaded as well and its
+# old definitions would override the new ones.
+
+- name: Create ~/.bashrc.d for {{ desktop_user }}
+  ansible.builtin.file:
+    path: "/home/{{ desktop_user }}/.bashrc.d"
+    state: directory
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0755"
+
+- name: Check whether ~/.bashrc already loads ~/.bashrc.d
+  ansible.builtin.command: grep -qs 'bashrc\.d' "/home/{{ desktop_user }}/.bashrc"
+  register: bashrc_loader_check
+  changed_when: false
+  failed_when: bashrc_loader_check.rc not in [0, 1, 2]  # 1 = no match, 2 = no .bashrc yet
+
+- name: Make ~/.bashrc load ~/.bashrc.d/* (only if it does not already)
+  ansible.builtin.blockinfile:
+    path: "/home/{{ desktop_user }}/.bashrc"
+    create: true
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0644"
+    backup: true
+    marker: "# {mark} ANSIBLE MANAGED BLOCK: bashrc.d loader"
+    block: |
+      if [ -d ~/.bashrc.d ]; then
+        for rc in ~/.bashrc.d/*; do
+          if [ -f "$rc" ]; then
+            . "$rc"
+          fi
+        done
+      fi
+      unset rc
+  when: bashrc_loader_check.rc != 0

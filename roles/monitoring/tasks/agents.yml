@@ -1,58 +1,72 @@
 ---
 # The pieces that sit next to the stack and feed it:
 #   1. Pushgateway - a container under the Forgejo service user, on the Forgejo
-#      network, so CI job containers can reach it by name.
+#      network, so CI job containers can reach it by name (only if Forgejo is
+#      installed).
 #   2. prometheus-podman-exporter - one systemd *user* service per Podman user
 #      to graph (service user + desktop user).
 #   3. Grafana Alloy - one host-wide agent (system service) that ships host
 #      metrics, the exporters' metrics, the Pushgateway's scan results and the
 #      journal (incl. container logs) into Prometheus and Loki.
 
-- name: Check that the forgejo role has run (the Pushgateway joins its network)
-  ansible.builtin.assert:
-    that:
-      - forgejo_user is defined
-      - forgejo_network_name is defined
-    fail_msg: "The monitoring role must run after the forgejo role (list it after 'forgejo' in site.yml)."
-    quiet: true
+# The Pushgateway only makes sense next to Forgejo (CI jobs push scan results
+# to it over Forgejo's network), so it is deployed only when Forgejo is
+# installed. Installing Forgejo later? Re-run this role to add it:
+#   ansible-playbook site.yml --tags monitoring
+- name: Look for an installed Forgejo (the Pushgateway joins its network)
+  ansible.builtin.stat:
+    path: "/home/{{ monitoring_forgejo_user }}/.config/containers/systemd/forgejo.container"
+  register: monitoring_forgejo_quadlet
 
-# ---------------------------------------------------------------- Pushgateway
+- name: Decide whether the Pushgateway is deployed
+  ansible.builtin.set_fact:
+    monitoring_pushgateway_enabled: "{{ monitoring_forgejo_quadlet.stat.exists }}"
 
-- name: Look up the Forgejo service user's uid
-  ansible.builtin.command: "id -u {{ forgejo_user }}"
-  register: monitoring_forgejo_uid
-  changed_when: false
+- name: Explain why there is no Pushgateway
+  ansible.builtin.debug:
+    msg: >-
+      Forgejo is not installed for {{ monitoring_forgejo_user }}, so the Pushgateway (CI scan
+      results) is skipped. Install Forgejo, then re-run with --tags monitoring.
+  when: not monitoring_pushgateway_enabled
 
-- name: Deploy the Pushgateway Quadlet unit
-  ansible.builtin.template:
-    src: pushgateway.container.j2
-    dest: "/home/{{ forgejo_user }}/.config/containers/systemd/pushgateway.container"
-    owner: "{{ forgejo_user }}"
-    group: "{{ forgejo_user }}"
-    mode: "0644"
-    backup: true
-  register: monitoring_pushgateway_quadlet
+- name: Deploy the Pushgateway next to Forgejo
+  when: monitoring_pushgateway_enabled
+  block:
+    - name: Look up the Forgejo service user's uid
+      ansible.builtin.command: "id -u {{ monitoring_forgejo_user }}"
+      register: monitoring_forgejo_uid
+      changed_when: false
 
-- name: Reload the Forgejo user's systemd units (picks up the Pushgateway)  # noqa: no-handler
-  ansible.builtin.systemd:
-    daemon_reload: true
-    scope: user
-  become: true
-  become_user: "{{ forgejo_user }}"
-  environment:
-    XDG_RUNTIME_DIR: "/run/user/{{ monitoring_forgejo_uid.stdout }}"
-  when: monitoring_pushgateway_quadlet.changed
+    - name: Deploy the Pushgateway Quadlet unit
+      ansible.builtin.template:
+        src: pushgateway.container.j2
+        dest: "/home/{{ monitoring_forgejo_user }}/.config/containers/systemd/pushgateway.container"
+        owner: "{{ monitoring_forgejo_user }}"
+        group: "{{ monitoring_forgejo_user }}"
+        mode: "0644"
+        backup: true
+      register: monitoring_pushgateway_quadlet
 
-- name: Start the Pushgateway
-  ansible.builtin.systemd:
-    name: pushgateway.service
-    scope: user
-    state: "{{ 'restarted' if monitoring_pushgateway_quadlet.changed else 'started' }}"
-    enabled: true
-  become: true
-  become_user: "{{ forgejo_user }}"
-  environment:
-    XDG_RUNTIME_DIR: "/run/user/{{ monitoring_forgejo_uid.stdout }}"
+    - name: Reload the Forgejo user's systemd units (picks up the Pushgateway)  # noqa: no-handler
+      ansible.builtin.systemd:
+        daemon_reload: true
+        scope: user
+      become: true
+      become_user: "{{ monitoring_forgejo_user }}"
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ monitoring_forgejo_uid.stdout }}"
+      when: monitoring_pushgateway_quadlet.changed
+
+    - name: Start the Pushgateway
+      ansible.builtin.systemd:
+        name: pushgateway.service
+        scope: user
+        state: "{{ 'restarted' if monitoring_pushgateway_quadlet.changed else 'started' }}"
+        enabled: true
+      become: true
+      become_user: "{{ monitoring_forgejo_user }}"
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ monitoring_forgejo_uid.stdout }}"
 
 # ----------------------------------------------------------- Podman exporters
 
@@ -62,6 +76,8 @@
     state: present
   when: ansible_facts['os_family'] == "RedHat"
 
+# Only users that exist get an exporter (the Forgejo user is absent when Forgejo
+# is not installed).
 - name: Look up the uids of the users whose Podman is monitored
   ansible.builtin.command: "id -u {{ item.user }}"
   loop: "{{ monitoring_podman_exporters }}"
@@ -69,8 +85,14 @@
     label: "{{ item.user }}"
   register: monitoring_exporter_uids
   changed_when: false
+  failed_when: false
 
-# The uid list and monitoring_podman_exporters line up by index (idx).
+- name: Keep the users that exist
+  ansible.builtin.set_fact:
+    monitoring_exporters_active: "{{ monitoring_exporter_uids.results | selectattr('rc', 'equalto', 0) | map(attribute='item') | list }}"
+    monitoring_exporters_uid_list: "{{ monitoring_exporter_uids.results | selectattr('rc', 'equalto', 0) | map(attribute='stdout') | list }}"
+
+# monitoring_exporters_uid_list and monitoring_exporters_active line up by index (idx).
 - name: Create the systemd user directory for each exporter user
   ansible.builtin.file:
     path: "/home/{{ item.user }}/.config/systemd/user"
@@ -78,7 +100,7 @@
     owner: "{{ item.user }}"
     group: "{{ item.user }}"
     mode: "0755"
-  loop: "{{ monitoring_podman_exporters }}"
+  loop: "{{ monitoring_exporters_active }}"
   loop_control:
     label: "{{ item.user }}"
 
@@ -90,7 +112,7 @@
     group: "{{ item.user }}"
     mode: "0644"
     backup: true
-  loop: "{{ monitoring_podman_exporters }}"
+  loop: "{{ monitoring_exporters_active }}"
   loop_control:
     label: "{{ item.user }}"
   register: monitoring_exporter_units
@@ -102,8 +124,8 @@
   become: true
   become_user: "{{ item.user }}"
   environment:
-    XDG_RUNTIME_DIR: "/run/user/{{ monitoring_exporter_uids.results[idx].stdout }}"
-  loop: "{{ monitoring_podman_exporters }}"
+    XDG_RUNTIME_DIR: "/run/user/{{ monitoring_exporters_uid_list[idx] }}"
+  loop: "{{ monitoring_exporters_active }}"
   loop_control:
     index_var: idx
     label: "{{ item.user }}"
@@ -117,8 +139,8 @@
   become: true
   become_user: "{{ item.user }}"
   environment:
-    XDG_RUNTIME_DIR: "/run/user/{{ monitoring_exporter_uids.results[idx].stdout }}"
-  loop: "{{ monitoring_podman_exporters }}"
+    XDG_RUNTIME_DIR: "/run/user/{{ monitoring_exporters_uid_list[idx] }}"
+  loop: "{{ monitoring_exporters_active }}"
   loop_control:
     index_var: idx
     label: "{{ item.user }}"

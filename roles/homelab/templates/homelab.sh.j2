@@ -1,47 +1,67 @@
-# homelab — start, stop and inspect the self-hosted stack.
+# homelab - start, stop and inspect the self-hosted stack.
 #
 #   homelab up      [scope]   start it
 #   homelab down    [scope]   stop it (plus any CI containers left behind)
 #   homelab status  [scope]   show what is running
 #
 # scope: forgejo      Forgejo and its Actions runner
-{% if homelab_monitoring_enabled | bool %}
 #        monitoring   Grafana, Prometheus, Loki, Alloy, Pushgateway, Podman exporters
-{% endif %}
-#        all          everything (default)
+#        k3s          the k3s Kubernetes cluster
+#        all          everything that is installed (default)
 #
-# The containers run as rootless Podman under their own service users, so this
-# uses sudo to reach those users' systemd instances. Managed by Ansible
+# What exists is detected EVERY time you run it, by asking systemd which units
+# are installed. Nothing about what the playbook installed is baked in, so it
+# stays right if you install or remove a piece by hand or with --tags. A group
+# that is not installed is skipped (`all`) or reported (named scope).
+#
+# The containers run as rootless Podman under their own service users, and k3s
+# is a system service, so this uses sudo. Managed by Ansible
 # (roles/homelab/templates/homelab.sh.j2). Local edits are overwritten on the
-# next playbook run; a timestamped backup is kept.
+# next playbook run.
 
+# Settings only (who runs what, what URLs to print), not install state.
 HOMELAB_FORGEJO_USER="{{ homelab_forgejo_user }}"
 HOMELAB_MONITORING_USER="{{ homelab_monitoring_user }}"
-HOMELAB_DESKTOP_USER="{{ desktop_user }}"
-HOMELAB_MONITORING={{ 1 if homelab_monitoring_enabled | bool else 0 }}
 HOMELAB_WEB_URL="http://localhost:{{ homelab_forgejo_http_port }}"
 HOMELAB_GRAFANA_URL="http://localhost:{{ homelab_grafana_port }}"
+HOMELAB_K3S_KUBECONFIG="{{ homelab_k3s_kubeconfig }}"
 {% raw %}
-# A unit is written "<owner>:<name>": owner is a user (its systemd --user
-# instance) or the word "system".
-_HOMELAB_FORGEJO_UNITS=(
+HOMELAB_K3S_KUBECONFIG_SRC=/etc/rancher/k3s/k3s.yaml
+HOMELAB_K3S_KILLALL=/usr/local/bin/k3s-killall.sh
+
+# Groups and their units. A unit is "<owner>:<name>": owner is a user (that
+# user's systemd --user instance) or the word "system". The first unit of a
+# group is its "anchor": the group counts as installed when it exists. The
+# first <CORE> units decide whether the group is running; the rest are listed
+# but do not make it "degraded" on their own.
+_HOMELAB_GROUPS=(forgejo monitoring k3s)
+_HOMELAB_ME=$(id -un)
+
+_HL_UNITS_forgejo=(
   "$HOMELAB_FORGEJO_USER:forgejo.service"
   "$HOMELAB_FORGEJO_USER:forgejo-runner.service"
   "$HOMELAB_FORGEJO_USER:podman.socket"   # API socket the runner uses for job containers
 )
-# The first _HOMELAB_*_CORE units decide a group's verdict; the rest are
-# listed but do not make it "degraded" on their own.
-_HOMELAB_FORGEJO_CORE=2
-_HOMELAB_MONITORING_UNITS=(
+_HL_CORE_forgejo=2
+
+_HL_UNITS_monitoring=(
   "$HOMELAB_MONITORING_USER:prometheus.service"
   "$HOMELAB_MONITORING_USER:loki.service"
   "$HOMELAB_MONITORING_USER:grafana.service"
   "system:alloy.service"
   "$HOMELAB_FORGEJO_USER:pushgateway.service"
   "$HOMELAB_FORGEJO_USER:prometheus-podman-exporter.service"
-  "$HOMELAB_DESKTOP_USER:prometheus-podman-exporter.service"
+  "$_HOMELAB_ME:prometheus-podman-exporter.service"
 )
-_HOMELAB_MONITORING_CORE=5
+_HL_CORE_monitoring=4   # Prometheus, Loki, Grafana, Alloy; the Pushgateway exists only with Forgejo
+
+_HL_UNITS_k3s=("system:k3s.service")
+_HL_CORE_k3s=1
+
+# Filled by _homelab_probe: load state ("loaded"/"not-found") and active state.
+declare -gA _HL_LOAD=() _HL_ACTIVE=()
+_HL_SELECTED=()
+_HL_MISSING=""
 
 # Run a command as <user> with that user's systemd instance reachable. The
 # subshell `cd /` matters: rootless podman fails when the working directory
@@ -49,43 +69,123 @@ _HOMELAB_MONITORING_CORE=5
 _homelab_as_user() {
   local user=$1 uid
   shift
-  uid=$(id -u "$user") || {
-    echo "homelab: user '$user' does not exist" >&2
-    return 1
-  }
-  if [ "$(id -un)" = "$user" ]; then
+  uid=$(id -u "$user") || return 1
+  if [ "$_HOMELAB_ME" = "$user" ]; then
     ( cd / && env XDG_RUNTIME_DIR="/run/user/${uid}" "$@" )
   else
     ( cd / && sudo -u "$user" env XDG_RUNTIME_DIR="/run/user/${uid}" "$@" )
   fi
 }
 
-# _homelab_unit_ctl <owner:unit> <systemctl verb> -> runs it for that owner
-_homelab_unit_ctl() {
-  local owner=${1%%:*} unit=${1#*:}
-  shift
-  if [ "$owner" = system ]; then
-    case "$1" in
-      is-active) systemctl "$@" "$unit" ;;
-      *) sudo systemctl "$@" "$unit" ;;
-    esac
-  else
-    _homelab_as_user "$owner" systemctl --user "$@" "$unit"
-  fi
+_homelab_group_units() { local v="_HL_UNITS_$1[@]"; printf '%s\n' "${!v}"; }
+_homelab_group_core() { local v="_HL_CORE_$1"; echo "${!v}"; }
+
+_homelab_title() {
+  case "$1" in
+    forgejo) echo "Forgejo stack" ;;
+    monitoring) echo "Monitoring" ;;
+    k3s) echo "k3s" ;;
+    *) echo "$1" ;;
+  esac
 }
 
-# Start/stop the given specs, one systemctl call per owner.
+# Ask systemd about <spec>... : one call per owner. Fills _HL_LOAD/_HL_ACTIVE.
+_homelab_probe() {
+  local spec owner o i line load active out
+  local -a owners=() mine=() names=()
+  for spec in "$@"; do
+    _HL_LOAD[$spec]=not-found
+    _HL_ACTIVE[$spec]=inactive
+    owner=${spec%%:*}
+    case " ${owners[*]} " in *" $owner "*) ;; *) owners+=("$owner") ;; esac
+  done
+  for o in "${owners[@]}"; do
+    mine=() names=()
+    for spec in "$@"; do
+      if [ "${spec%%:*}" = "$o" ]; then
+        mine+=("$spec")
+        names+=("${spec#*:}")
+      fi
+    done
+    if [ "$o" = system ]; then
+      out=$(systemctl show -p LoadState -p ActiveState "${names[@]}" 2>/dev/null) || continue
+    else
+      id -u "$o" >/dev/null 2>&1 || continue   # user not created = nothing installed for it
+      out=$(_homelab_as_user "$o" systemctl --user show -p LoadState -p ActiveState "${names[@]}" 2>/dev/null) || continue
+    fi
+    i=0 load="" active=""
+    # `systemctl show` prints one block per unit, in the order asked, blank-line separated.
+    while IFS= read -r line; do
+      case "$line" in
+        LoadState=*) load=${line#*=} ;;
+        ActiveState=*) active=${line#*=} ;;
+        "")
+          if [ -n "$load$active" ] && [ "$i" -lt "${#mine[@]}" ]; then
+            _HL_LOAD[${mine[$i]}]=$load
+            _HL_ACTIVE[${mine[$i]}]=$active
+            i=$((i + 1))
+            load="" active=""
+          fi
+          ;;
+      esac
+    done <<<"$out"$'\n'
+  done
+}
+
+_homelab_probe_all() {
+  local g
+  local -a specs=()
+  for g in "${_HOMELAB_GROUPS[@]}"; do
+    mapfile -t -O "${#specs[@]}" specs < <(_homelab_group_units "$g")
+  done
+  specs+=("$HOMELAB_FORGEJO_USER:podman.service")
+  _homelab_probe "${specs[@]}"
+}
+
+_homelab_group_installed() {
+  local -a u
+  mapfile -t u < <(_homelab_group_units "$1")
+  [ "${_HL_LOAD[${u[0]}]:-}" = loaded ]
+}
+
+# Work out which groups a command applies to -> _HL_SELECTED. Needs a probe.
+# Returns 2 (after saying why) when nothing applies.
+_homelab_select() {
+  local scope=$1 g missing=()
+  _HL_SELECTED=()
+  for g in "${_HOMELAB_GROUPS[@]}"; do
+    if _homelab_group_installed "$g"; then
+      if [ "$scope" = all ] || [ "$scope" = "$g" ]; then _HL_SELECTED+=("$g"); fi
+    elif [ "$scope" = all ]; then
+      missing+=("$g")
+    fi
+  done
+  if [ "${#_HL_SELECTED[@]}" -eq 0 ]; then
+    if [ "$scope" = all ]; then
+      echo "homelab: nothing is installed (looked for: ${_HOMELAB_GROUPS[*]})" >&2
+    else
+      echo "homelab: '$scope' is not installed on this machine" >&2
+    fi
+    return 2
+  fi
+  [ "${#missing[@]}" -gt 0 ] && _HL_MISSING="${missing[*]}" || _HL_MISSING=""
+  return 0
+}
+
+# Start/stop/etc. the given specs that are installed, one systemctl call per owner.
 _homelab_units_do() {
   local verb=$1 spec owner rc=0
   shift
-  local -a owners=()
+  local -a owners=() names=() todo=()
   for spec in "$@"; do
+    [ "${_HL_LOAD[$spec]:-}" = loaded ] || continue
+    todo+=("$spec")
     owner=${spec%%:*}
     case " ${owners[*]} " in *" $owner "*) ;; *) owners+=("$owner") ;; esac
   done
   for owner in "${owners[@]}"; do
-    local -a names=()
-    for spec in "$@"; do
+    names=()
+    for spec in "${todo[@]}"; do
       [ "${spec%%:*}" = "$owner" ] && names+=("${spec#*:}")
     done
     if [ "$owner" = system ]; then
@@ -97,24 +197,20 @@ _homelab_units_do() {
   return "$rc"
 }
 
-# _homelab_report <title> <ncore> <spec>...  -> prints the group, returns
-# 0 running, 1 degraded, 3 stopped.
+# ------------------------------------------------------------------- status
+
+# _homelab_report <group> -> prints it; returns 0 running, 1 degraded, 3 stopped.
 _homelab_report() {
-  local title=$1 ncore=$2 i state running=0 spec owner
-  shift 2
-  local -a specs=("$@")
-  local -a states=()
+  local g=$1 ncore i spec state running=0 verdict code
+  local -a specs=()
+  ncore=$(_homelab_group_core "$g")
+  mapfile -t specs < <(_homelab_group_units "$g")
   for i in "${!specs[@]}"; do
-    spec=${specs[$i]}
-    state=$(_homelab_unit_ctl "$spec" is-active 2>/dev/null) || true
-    state=${state%%$'\n'*}
-    states[i]=${state:-unavailable}
-    if [ "$i" -lt "$ncore" ] && [ "${states[$i]}" = active ]; then
+    if [ "$i" -lt "$ncore" ] && [ "${_HL_ACTIVE[${specs[$i]}]}" = active ] \
+      && [ "${_HL_LOAD[${specs[$i]}]}" = loaded ]; then
       running=$((running + 1))
     fi
   done
-
-  local verdict code
   if [ "$running" -eq "$ncore" ]; then
     verdict=running code=0
   elif [ "$running" -eq 0 ]; then
@@ -122,73 +218,101 @@ _homelab_report() {
   else
     verdict=degraded code=1
   fi
-
-  echo "$title: $verdict"
-  for i in "${!specs[@]}"; do
-    spec=${specs[$i]}
-    owner=${spec%%:*}
-    printf '  %-36s %-12s %s\n' "${spec#*:}" "${states[$i]}" "($owner)"
+  echo "$(_homelab_title "$g"): $verdict"
+  for spec in "${specs[@]}"; do
+    if [ "${_HL_LOAD[$spec]}" = loaded ]; then state=${_HL_ACTIVE[$spec]}; else state="not installed"; fi
+    printf '  %-36s %-14s %s\n' "${spec#*:}" "$state" "(${spec%%:*})"
   done
   return "$code"
 }
 
+_homelab_extra() {
+  case "$1" in
+    forgejo) echo "  Web UI: $HOMELAB_WEB_URL" ;;
+    monitoring) echo "  Grafana: $HOMELAB_GRAFANA_URL" ;;
+    k3s)
+      local nodes
+      nodes=$(KUBECONFIG="$HOMELAB_K3S_KUBECONFIG" timeout 5 k3s kubectl get nodes --no-headers 2>/dev/null \
+        | awk '{printf "%s%s (%s)", sep, $1, $2; sep=", "}')
+      [ -n "$nodes" ] && echo "  Nodes: $nodes"
+      echo "  kubectl: KUBECONFIG=$HOMELAB_K3S_KUBECONFIG"
+      ;;
+  esac
+}
+
 _homelab_status() {
-  local scope=$1 rc n_run=0 n_stop=0 n_all=0
-  if _homelab_in_scope "$scope" forgejo; then
-    _homelab_report "Forgejo stack" "$_HOMELAB_FORGEJO_CORE" "${_HOMELAB_FORGEJO_UNITS[@]}"
+  local scope=$1 g rc n_run=0 n_stop=0 n_all=0
+  _homelab_probe_all
+  _homelab_select "$scope" || return 2
+  for g in "${_HL_SELECTED[@]}"; do
+    _homelab_report "$g"
     rc=$?
-    [ "$rc" -eq 0 ] && echo "  Web UI: $HOMELAB_WEB_URL"
+    [ "$rc" -eq 0 ] && _homelab_extra "$g"
     n_all=$((n_all + 1))
     [ "$rc" -eq 0 ] && n_run=$((n_run + 1))
     [ "$rc" -eq 3 ] && n_stop=$((n_stop + 1))
-  fi
-  if _homelab_in_scope "$scope" monitoring; then
-    _homelab_report "Monitoring" "$_HOMELAB_MONITORING_CORE" "${_HOMELAB_MONITORING_UNITS[@]}"
-    rc=$?
-    [ "$rc" -eq 0 ] && echo "  Grafana: $HOMELAB_GRAFANA_URL"
-    n_all=$((n_all + 1))
-    [ "$rc" -eq 0 ] && n_run=$((n_run + 1))
-    [ "$rc" -eq 3 ] && n_stop=$((n_stop + 1))
-  fi
+  done
+  [ -n "$_HL_MISSING" ] && echo "Not installed: $_HL_MISSING"
   # Overall: 0 all running, 3 all stopped, otherwise 1.
   [ "$n_run" -eq "$n_all" ] && return 0
   [ "$n_stop" -eq "$n_all" ] && return 3
   return 1
 }
 
-# _homelab_in_scope <requested> <group>; the monitoring group only exists when
-# monitoring was installed.
-_homelab_in_scope() {
-  case "$1" in
-    all) [ "$2" = forgejo ] || [ "$HOMELAB_MONITORING" -eq 1 ] ;;
-    "$2") [ "$2" = forgejo ] || [ "$HOMELAB_MONITORING" -eq 1 ] ;;
-    *) return 1 ;;
-  esac
+# ----------------------------------------------------------------------- up
+
+_homelab_up_forgejo() {
+  local -a u
+  mapfile -t u < <(_homelab_group_units forgejo)
+  _homelab_units_do start "${u[@]}"
+}
+
+_homelab_up_monitoring() {
+  local -a u
+  mapfile -t u < <(_homelab_group_units monitoring)
+  # The Pushgateway and the exporter for Forgejo's Podman need that user's Podman socket.
+  _homelab_units_do start "$HOMELAB_FORGEJO_USER:podman.socket" "${u[@]}"
+}
+
+_homelab_up_k3s() {
+  local i ready=0
+  _homelab_units_do start "system:k3s.service" || return 1
+  echo "Waiting for the k3s API..."
+  for i in $(seq 1 45); do
+    if sudo k3s kubectl get --raw=/readyz >/dev/null 2>&1; then ready=1; break; fi
+    sleep 2
+  done
+  if [ "$ready" -ne 1 ]; then
+    echo "homelab: k3s did not become ready in 90s (journalctl -u k3s)" >&2
+    return 1
+  fi
+  # Your own copy of the credentials; they change if the cluster is ever recreated.
+  # The redirect deliberately runs as YOU (not under sudo) so the copy is yours.
+  # shellcheck disable=SC2024
+  ( umask 077 && mkdir -p "$(dirname "$HOMELAB_K3S_KUBECONFIG")" \
+    && sudo cat "$HOMELAB_K3S_KUBECONFIG_SRC" >"$HOMELAB_K3S_KUBECONFIG" ) \
+    || echo "homelab: could not refresh $HOMELAB_K3S_KUBECONFIG" >&2
 }
 
 _homelab_up() {
-  local scope=$1 rc=0
-  if _homelab_in_scope "$scope" forgejo; then
-    echo "Starting Forgejo stack..."
-    _homelab_units_do start "${_HOMELAB_FORGEJO_UNITS[@]}" || rc=1
-  fi
-  # After Forgejo: the Pushgateway joins Forgejo's network.
-  if _homelab_in_scope "$scope" monitoring; then
-    echo "Starting monitoring..."
-    _homelab_units_do start "${_HOMELAB_FORGEJO_UNITS[2]}" "${_HOMELAB_MONITORING_UNITS[@]}" || rc=1
-  fi
-  if [ "$rc" -ne 0 ]; then
-    echo "homelab: something failed to start; see 'homelab status'" >&2
-  fi
+  local scope=$1 g rc=0 st
+  _homelab_probe_all
+  _homelab_select "$scope" || return 2
+  for g in "${_HL_SELECTED[@]}"; do
+    echo "Starting $(_homelab_title "$g")..."
+    "_homelab_up_$g" || rc=1
+  done
+  [ "$rc" -ne 0 ] && echo "homelab: something failed to start; see 'homelab status'" >&2
   _homelab_status "$scope"
-  local st=$?
+  st=$?
   [ "$rc" -ne 0 ] && return 1
   return "$st"
 }
 
+# --------------------------------------------------------------------- down
+
 # Stop leftover CI containers (started through the podman socket, they can
-# outlive the runner if it was stopped mid-job). Containers named in $1.. are
-# spared: stopping Forgejo alone must not take the Pushgateway down.
+# outlive the runner if it was stopped mid-job). Containers named in $@ are spared.
 _homelab_stop_leftovers() {
   local names n
   names=$(_homelab_as_user "$HOMELAB_FORGEJO_USER" podman ps --format '{{.Names}}' 2>/dev/null) || return 0
@@ -202,28 +326,54 @@ _homelab_stop_leftovers() {
   _homelab_as_user "$HOMELAB_FORGEJO_USER" podman stop --time 10 "${stop[@]}" >/dev/null 2>&1
 }
 
+_homelab_down_monitoring() {
+  # Reverse of start order. The Podman socket stays (Forgejo may need it).
+  _homelab_units_do stop \
+    "system:alloy.service" \
+    "$_HOMELAB_ME:prometheus-podman-exporter.service" \
+    "$HOMELAB_FORGEJO_USER:prometheus-podman-exporter.service" \
+    "$HOMELAB_FORGEJO_USER:pushgateway.service" \
+    "$HOMELAB_MONITORING_USER:grafana.service" \
+    "$HOMELAB_MONITORING_USER:loki.service" \
+    "$HOMELAB_MONITORING_USER:prometheus.service"
+}
+
+# $1 = scope. Stopping only Forgejo must not take the Pushgateway or the Podman
+# socket down while monitoring is installed and staying up.
+_homelab_down_forgejo() {
+  local rc=0 keep=0
+  if [ "$1" = forgejo ] && _homelab_group_installed monitoring; then keep=1; fi
+  _homelab_units_do stop "$HOMELAB_FORGEJO_USER:forgejo-runner.service" "$HOMELAB_FORGEJO_USER:forgejo.service" || rc=1
+  if [ "$keep" -eq 1 ]; then
+    _homelab_stop_leftovers pushgateway
+  else
+    _homelab_stop_leftovers
+    _homelab_units_do stop "$HOMELAB_FORGEJO_USER:podman.socket" "$HOMELAB_FORGEJO_USER:podman.service" >/dev/null 2>&1
+  fi
+  return "$rc"
+}
+
+_homelab_down_k3s() {
+  # `systemctl stop k3s` alone leaves every pod's container running (by design,
+  # so k3s can be upgraded without downtime). The killall script stops those
+  # too and unmounts their filesystems.
+  if [ -x "$HOMELAB_K3S_KILLALL" ]; then
+    sudo "$HOMELAB_K3S_KILLALL"
+  else
+    _homelab_units_do stop "system:k3s.service"
+  fi
+}
+
 _homelab_down() {
-  local scope=$1 rc=0
-  if _homelab_in_scope "$scope" monitoring; then
-    echo "Stopping monitoring..."
-    # Reverse of start order; the Podman socket stays (Forgejo needs it).
-    _homelab_units_do stop \
-      "${_HOMELAB_MONITORING_UNITS[3]}" "${_HOMELAB_MONITORING_UNITS[6]}" \
-      "${_HOMELAB_MONITORING_UNITS[5]}" "${_HOMELAB_MONITORING_UNITS[4]}" \
-      "${_HOMELAB_MONITORING_UNITS[2]}" "${_HOMELAB_MONITORING_UNITS[1]}" \
-      "${_HOMELAB_MONITORING_UNITS[0]}" || rc=1
-  fi
-  if _homelab_in_scope "$scope" forgejo; then
-    echo "Stopping Forgejo stack..."
-    _homelab_units_do stop "${_HOMELAB_FORGEJO_UNITS[1]}" "${_HOMELAB_FORGEJO_UNITS[0]}" || rc=1
-    if [ "$scope" = all ] || [ "$HOMELAB_MONITORING" -eq 0 ]; then
-      _homelab_stop_leftovers
-      _homelab_units_do stop "${_HOMELAB_FORGEJO_UNITS[2]}" >/dev/null 2>&1
-      _homelab_as_user "$HOMELAB_FORGEJO_USER" systemctl --user stop podman.service >/dev/null 2>&1
-    else
-      _homelab_stop_leftovers pushgateway
-    fi
-  fi
+  local scope=$1 g rc=0 i
+  _homelab_probe_all
+  _homelab_select "$scope" || return 2
+  # Reverse order: k3s, monitoring, Forgejo.
+  for ((i = ${#_HL_SELECTED[@]} - 1; i >= 0; i--)); do
+    g=${_HL_SELECTED[$i]}
+    echo "Stopping $(_homelab_title "$g")..."
+    "_homelab_down_$g" "$scope" || rc=1
+  done
   _homelab_status "$scope" || true
   return "$rc"
 }
@@ -231,22 +381,18 @@ _homelab_down() {
 homelab() {
   local scope=${2:-all}
   case "$scope" in
-    all | forgejo | monitoring) ;;
+    all | forgejo | monitoring | k3s) ;;
     *)
-      echo "homelab: unknown scope '$scope' (use forgejo, monitoring or all)" >&2
+      echo "homelab: unknown scope '$scope' (use forgejo, monitoring, k3s or all)" >&2
       return 2
       ;;
   esac
-  if [ "$scope" = monitoring ] && [ "$HOMELAB_MONITORING" -ne 1 ]; then
-    echo "homelab: monitoring is not installed (monitoring_enabled is false)" >&2
-    return 2
-  fi
   case "${1:-}" in
     up)     _homelab_up "$scope" ;;
     down)   _homelab_down "$scope" ;;
     status) _homelab_status "$scope" ;;
     *)
-      echo "Usage: homelab {up|down|status} [forgejo|monitoring|all]" >&2
+      echo "Usage: homelab {up|down|status} [forgejo|monitoring|k3s|all]" >&2
       return 2
       ;;
   esac
@@ -256,7 +402,7 @@ _homelab_complete() {
   local cur=${COMP_WORDS[COMP_CWORD]}
   case "$COMP_CWORD" in
     1) mapfile -t COMPREPLY < <(compgen -W "up down status" -- "$cur") ;;
-    2) mapfile -t COMPREPLY < <(compgen -W "all forgejo monitoring" -- "$cur") ;;
+    2) mapfile -t COMPREPLY < <(compgen -W "all forgejo monitoring k3s" -- "$cur") ;;
     *) COMPREPLY=() ;;
   esac
 }

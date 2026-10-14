@@ -1,0 +1,52 @@
+---
+# k3s: a single-node Kubernetes (server + agent in one) as a system service,
+# next to the rootless Podman containers the other roles run.
+#
+# Podman cannot be k3s's container runtime (it does not speak CRI), so k3s
+# keeps its own containerd and the two live side by side. This role tunes the
+# host so they do not get in each other's way, and adds `k3s-load` to copy
+# images you build with Podman into the cluster.
+
+# Pinned release. Check https://github.com/k3s-io/k3s/releases and bump
+# deliberately; changing it upgrades k3s in place on the next run.
+k3s_version: "v1.34.12+k3s1"
+k3s_install_script_url: "https://get.k3s.io"
+k3s_install_script_path: /var/tmp/k3s-install.sh
+
+# false: installed but NOT enabled and NOT started by the playbook; bring it up
+# with `homelab up k3s`. true: enabled at boot and started.
+k3s_autostart: false
+
+# Pod and service networks. These must not overlap Podman's networks (Podman's
+# default is 10.88.0.0/16 and Quadlet `.network` units get 10.89.x and up).
+# Change them only if you have an overlap.
+k3s_cluster_cidr: "10.42.0.0/16"
+k3s_service_cidr: "10.43.0.0/16"
+
+# Built-in add-ons to switch off, e.g. [traefik, servicelb, metrics-server].
+# Traefik + the service load balancer publish ports 80 and 443 on the host.
+k3s_disable: []
+
+# Anything else for /etc/rancher/k3s/config.yaml, as a mapping, e.g.
+#   k3s_config_extra: {node-name: homelab, tls-san: [homelab.lan]}
+k3s_config_extra: {}
+
+# Trust the pod/service networks in firewalld (needed for pods to reach the
+# API server and each other on Fedora). Ignored when firewalld is not running.
+k3s_manage_firewalld: true
+
+# Kernel settings k3s and many containers need; the inotify limits also help
+# rootless Podman with many containers.
+k3s_sysctl:
+  net.ipv4.ip_forward: 1
+  net.bridge.bridge-nf-call-iptables: 1
+  net.bridge.bridge-nf-call-ip6tables: 1
+  fs.inotify.max_user_watches: 524288
+  fs.inotify.max_user_instances: 1024
+
+# Tell k3s to use its SELinux policy (installed by the k3s installer). Follows
+# the machine: on when SELinux is enabled, which is Fedora's default.
+k3s_selinux: "{{ (ansible_facts['selinux']['status'] | default('disabled')) == 'enabled' }}"
+
+# Where the user's copy of the kubeconfig goes (the original is root-only).
+k3s_kubeconfig_path: "/home/{{ desktop_user }}/.kube/k3s.yaml"

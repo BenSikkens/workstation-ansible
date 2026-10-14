@@ -1,0 +1,38 @@
+# k3s helpers for {{ desktop_user }}. Managed by Ansible (roles/k3s/templates/k3s.sh.j2).
+
+# kubectl (installed by k3s as /usr/local/bin/kubectl) reads this copy of the
+# cluster's credentials. `homelab up k3s` refreshes it every time k3s starts.
+export KUBECONFIG="{{ k3s_kubeconfig_path }}"
+
+if [ -x /usr/local/bin/kubectl ] && type _init_completion >/dev/null 2>&1; then
+  # shellcheck disable=SC1090
+  source <(/usr/local/bin/kubectl completion bash 2>/dev/null)
+fi
+
+# k3s-load IMAGE...   copy images from your Podman storage into k3s
+#
+#   podman build -t localhost/myapp:dev .
+#   k3s-load localhost/myapp:dev
+#
+# k3s has its own image store (containerd), separate from Podman's. In your
+# manifests use `imagePullPolicy: IfNotPresent` (or `Never`) for these images,
+# otherwise k3s tries to pull `localhost/...` from a registry and fails.
+k3s-load() {
+  if [ $# -eq 0 ]; then
+    echo "usage: k3s-load IMAGE..." >&2
+    return 2
+  fi
+  if ! systemctl is-active --quiet k3s.service; then
+    echo "k3s-load: k3s is not running (try: homelab up k3s)" >&2
+    return 1
+  fi
+  local image
+  for image in "$@"; do
+    if ! podman image exists "$image"; then
+      echo "k3s-load: '$image' is not in your Podman storage" >&2
+      return 1
+    fi
+    echo "Loading $image into k3s..."
+    podman save --format docker-archive "$image" | sudo /usr/local/bin/k3s ctr images import - || return 1
+  done
+}

@@ -33,6 +33,25 @@ ansible-playbook site.yml
 
 If your user doesn't have passwordless sudo configured, add `--ask-become-pass`.
 
+## Installing one piece at a time
+
+Every role is tagged with its own name, so you can install, or update, just
+the part you want:
+
+```bash
+ansible-playbook site.yml --tags k3s --ask-become-pass
+ansible-playbook site.yml --tags forgejo,monitoring --ask-become-pass
+ansible-playbook site.yml --skip-tags k3s --ask-become-pass   # everything but k3s
+ansible-playbook site.yml --list-tags                          # all tags
+```
+
+Roles that need another one pull it in themselves (`podman_desktop` and
+`obsidian` need `flatpak_setup`; `homelab` and `k3s` need `bashrc_loader`), so
+a tag always works on its own. `monitoring` adapts to what exists: the
+Pushgateway for CI scan results is only set up when Forgejo is installed, and
+the Podman exporter only covers users that exist. If you add Forgejo later,
+re-run `--tags monitoring`.
+
 ## Before running: review what will change
 
 Always preview a run before applying it, especially after editing a role or
@@ -72,7 +91,9 @@ protect there. The places that *do* write a file outright are:
   is only rebuilt when it actually changed (or the image is missing).
 - `~/.bashrc` is only touched if it doesn't already load `~/.bashrc.d/`
   (Fedora's default does), and then via a marked block with a backup. The
-  `homelab` command itself lives in its own drop-in, `~/.bashrc.d/homelab.sh`.
+  `homelab` command (and the k3s helpers) live in their own drop-ins in
+  `~/.bashrc.d/`, written without backups because everything in that directory
+  is sourced.
 - Forgejo's own application config (`app.ini`, inside the data volume) and
   any vault/repo data are never templated or written by this playbook at
   all — Forgejo manages those itself, so there's nothing here that could
@@ -116,6 +137,8 @@ To make a role portable to Debian/Arch/etc. later, either:
 | `obsidian` | Obsidian | Flatpak (Flathub) |
 | `todotxt` | todo.txt-cli + GNOME Shell "Todo.txt" extension | upstream GitHub tarball + extensions.gnome.org, for `desktop_user` |
 | `devpod` | DevPod CLI | binary from GitHub releases (`loft-sh/devpod`) |
+| `k3s` | k3s (single-node Kubernetes), tuned to live next to Podman | official installer, pinned version; system service, off until `homelab up k3s` |
+| `bashrc_loader` | makes `~/.bashrc` load `~/.bashrc.d/*` | pulled in by `homelab` and `k3s` |
 | `homelab` | the `homelab up\|down\|status` command | bash function in `~/.bashrc.d/` for `desktop_user` |
 
 ### Forgejo (self-hosted git server)
@@ -250,39 +273,54 @@ pinned ruleset like `p/default` or your own rules file does not need to.
 
 #### `homelab`: switch the whole stack on and off
 
-(Installed by the separate `homelab` role, which runs last so it knows
-whether monitoring is present.)
+(Installed by the separate `homelab` role.)
 
 The stack holds resources even when idle, so a `homelab` command is
 installed for your desktop user (`desktop_user`) as a drop-in at
 `~/.bashrc.d/homelab.sh`, which Fedora's `~/.bashrc` already sources:
 
 ```bash
-homelab up                  # start everything: Forgejo, runner, monitoring
+homelab up                  # start everything that is installed
 homelab down                # stop it all, plus any CI containers left behind
 homelab status              # running / degraded / stopped, per unit
+homelab up k3s              # only the k3s cluster
 homelab down forgejo        # only Forgejo + runner (monitoring keeps running)
 homelab status monitoring   # only Grafana, Prometheus, Loki, Alloy, ...
 ```
 
-The optional scope is `forgejo`, `monitoring` or `all` (default). With
-`monitoring_enabled: false` only `forgejo` exists. `homelab down forgejo`
-deliberately leaves the Pushgateway and the Podman socket alone, so
-monitoring keeps working.
+The optional scope is `forgejo`, `monitoring`, `k3s` or `all` (default).
+
+**What it manages is detected every time you run it.** It asks systemd which
+units exist, so it reflects the machine, not what the playbook last did: a
+piece you installed or removed by hand, or with `--tags`, is picked up on the
+next command, with no re-run of the `homelab` role. `all` covers whatever is
+installed and prints `Not installed: ...` for the rest; naming a scope that is
+not installed says so and exits 2. (Only settings, the service user names and
+the ports in the printed URLs, are written by Ansible.)
 
 `status` exits 0 when everything in scope is running, 1 when degraded and 3
 when stopped, so it is usable in scripts. A group counts as running when its
-core units are up (Forgejo + runner; Prometheus, Loki, Grafana, Alloy and the
-Pushgateway); the Podman exporters are listed but do not make a group
-"degraded" on their own. Tab completion is included. It uses `sudo` to reach
-the service users' systemd instances, so expect a password prompt. The
+core units are up (Forgejo + runner; Prometheus, Loki, Grafana and Alloy;
+k3s); the Pushgateway and the Podman exporters are listed but do not make a
+group "degraded" on their own. Tab completion is included. It uses `sudo` to
+reach the service users' systemd instances, so expect a password prompt. The
 command only appears in **new** shells; in an open terminal run
 `source ~/.bashrc.d/homelab.sh`.
 
-`homelab down` is a runtime switch only: the services are enabled and the
-service users have lingering on, so the stack comes back up at the next boot
-(and `ansible-playbook` starts it if it's down). Say if you'd rather have it
-stay off until you run `homelab up`.
+Details worth knowing:
+
+- `homelab down forgejo` leaves the Pushgateway and the Podman socket alone
+  while monitoring is installed, so monitoring keeps working.
+- `homelab up k3s` waits until the API answers, then refreshes your copy of
+  the kubeconfig (`~/.kube/k3s.yaml`).
+- `homelab down k3s` runs `k3s-killall.sh`: a plain `systemctl stop k3s`
+  leaves every pod's container running (by design, so k3s can be upgraded
+  without downtime), which defeats the point of switching it off.
+
+`homelab down` is a runtime switch only. Forgejo and monitoring are enabled and
+their service users have lingering on, so they come back at the next boot
+(and `ansible-playbook` starts them if they are down). k3s is the exception:
+it is not enabled at boot unless you set `k3s_autostart: true`.
 
 #### Backup, restore and cleanup (`forgejo-backup.yml`)
 
@@ -419,7 +457,52 @@ users are watched). To skip all of it set `monitoring_enabled: false` in
   already write. Containers started by hand (`podman run`) are in the journal
   only if they use the journald log driver.
 - Grafana is not exposed beyond localhost and has no TLS; put a reverse proxy
-  in front if you ever want remote access.
+  in front if you ever want remote access. See [NETWORKING.md](NETWORKING.md)
+  for what is reachable from where and how to change it.
+
+### k3s (single-node Kubernetes)
+
+k3s runs on the host as a normal system service, next to Podman. Podman cannot
+be k3s's container runtime (it does not provide the CRI interface k3s needs),
+so k3s keeps its own containerd and the two are tuned to coexist:
+
+| What | Why |
+|---|---|
+| `k3s-selinux` policy + `selinux: true` in the k3s config | Fedora enforces SELinux; installed by the official installer |
+| firewalld: pod (`10.42.0.0/16`) and service (`10.43.0.0/16`) networks in the `trusted` zone | without it pods cannot reach the API server or each other |
+| `overlay` and `br_netfilter` modules, loaded at boot | needed for container storage and bridge networking |
+| sysctl `ip_forward`, `bridge-nf-call-*`, larger inotify limits (`/etc/sysctl.d/90-k3s.conf`) | the inotify limits also help rootless Podman with many containers |
+| cluster/service CIDRs chosen to avoid Podman's `10.88.0.0/16` and the `10.89.x` networks Quadlet creates | no routing overlap with the Forgejo/monitoring networks |
+| `k3s-load` (shell function) | copies images built with Podman into k3s's image store |
+
+Using it:
+
+```bash
+homelab up k3s                       # start (and refresh ~/.kube/k3s.yaml)
+kubectl get nodes                    # kubectl is installed by k3s; KUBECONFIG is set for you
+podman build -t localhost/myapp:dev .
+k3s-load localhost/myapp:dev         # Podman -> k3s, no registry needed
+homelab down k3s                     # stop it and all its pods
+```
+
+In your manifests use `imagePullPolicy: IfNotPresent` (or `Never`) for loaded
+images, otherwise k3s tries to pull `localhost/...` from a registry.
+
+Settings are in `roles/k3s/defaults/main.yml`: `k3s_version` (pinned; changing
+it upgrades in place), `k3s_autostart` (default `false`: installed but off
+until `homelab up k3s`), `k3s_disable` (switch off Traefik, the service load
+balancer, ...), `k3s_config_extra` (anything else for
+`/etc/rancher/k3s/config.yaml`), the two CIDRs and `k3s_manage_firewalld`.
+Install it alone with `ansible-playbook site.yml --tags k3s`.
+
+Removing k3s is deliberately not automated, since it deletes the cluster and
+its data: `sudo /usr/local/bin/k3s-uninstall.sh`. The firewalld trusted
+sources and `/etc/sysctl.d/90-k3s.conf` stay behind; remove them by hand if you
+want them gone. Ports k3s opens on the host are listed in
+[NETWORKING.md](NETWORKING.md).
+
+The installer (`get.k3s.io`) is downloaded and run as root, as upstream
+recommends; the version it installs is pinned by `k3s_version`.
 
 ### Obsidian
 

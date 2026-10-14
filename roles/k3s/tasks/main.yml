@@ -1,0 +1,168 @@
+---
+# Installs k3s on the host with the official installer, pinned to k3s_version,
+# and tunes the machine so it lives next to Podman. See defaults/main.yml for
+# the settings and README.md ("k3s") for how to use it.
+#
+# The installer (https://get.k3s.io) is run as root. It installs the binary,
+# the k3s-selinux policy package, the systemd unit and the k3s-killall.sh /
+# k3s-uninstall.sh helper scripts. It is told NOT to enable or start the
+# service; that is decided below by k3s_autostart.
+
+# ------------------------------------------------------------- kernel and sysctl
+
+- name: Load the kernel modules k3s needs now and at every boot
+  community.general.modprobe:
+    name: "{{ item }}"
+    state: present
+    persistent: present
+  loop:
+    - overlay
+    - br_netfilter
+
+- name: Apply the kernel settings k3s needs
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_file: /etc/sysctl.d/90-k3s.conf
+    sysctl_set: true
+    state: present
+    reload: true
+  loop: "{{ k3s_sysctl | dict2items }}"
+
+# ----------------------------------------------------------------------- firewalld
+
+- name: Check whether firewalld is running
+  ansible.builtin.command: systemctl is-active --quiet firewalld  # noqa: command-instead-of-module
+  register: k3s_firewalld
+  changed_when: false
+  failed_when: false
+
+# Without this, pods cannot reach the API server or each other under Fedora's
+# default firewall. The two networks are internal to the cluster; nothing on
+# the LAN is opened.
+- name: Trust the pod and service networks in firewalld
+  ansible.posix.firewalld:
+    zone: trusted
+    source: "{{ item }}"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop:
+    - "{{ k3s_cluster_cidr }}"
+    - "{{ k3s_service_cidr }}"
+  when:
+    - k3s_manage_firewalld | bool
+    - k3s_firewalld.rc == 0
+
+# ---------------------------------------------------------------------- install
+
+- name: Check the installed k3s version
+  ansible.builtin.command: /usr/local/bin/k3s --version
+  register: k3s_installed_version
+  changed_when: false
+  failed_when: false
+
+- name: Download the k3s installer
+  ansible.builtin.get_url:
+    url: "{{ k3s_install_script_url }}"
+    dest: "{{ k3s_install_script_path }}"
+    owner: root
+    group: root
+    mode: "0700"
+    force: true
+  when: k3s_version not in (k3s_installed_version.stdout | default(''))
+
+- name: Install k3s {{ k3s_version }}
+  ansible.builtin.command: sh {{ k3s_install_script_path }}
+  environment:
+    INSTALL_K3S_VERSION: "{{ k3s_version }}"
+    INSTALL_K3S_SKIP_START: "true"
+    INSTALL_K3S_SKIP_ENABLE: "true"
+  register: k3s_install
+  changed_when: true
+  when: k3s_version not in (k3s_installed_version.stdout | default(''))
+
+- name: Create /etc/rancher/k3s
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Write the k3s configuration
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: /etc/rancher/k3s/config.yaml
+    owner: root
+    group: root
+    mode: "0600"
+    backup: true
+  register: k3s_config
+
+# ---------------------------------------------------------------------- service
+
+- name: Check whether k3s is running
+  ansible.builtin.command: systemctl is-active --quiet k3s.service  # noqa: command-instead-of-module
+  register: k3s_active
+  changed_when: false
+  failed_when: false
+
+- name: Enable k3s at boot, or leave it off
+  ansible.builtin.systemd:
+    name: k3s.service
+    enabled: "{{ k3s_autostart | bool }}"
+    daemon_reload: true
+
+- name: Start k3s (k3s_autostart)
+  ansible.builtin.systemd:
+    name: k3s.service
+    state: started
+  when: k3s_autostart | bool
+
+# A running k3s only reads its config and binary at start. Restart it when
+# either changed; one that is stopped (the default) is left stopped.
+- name: Restart k3s so a new version or configuration takes effect
+  ansible.builtin.systemd:
+    name: k3s.service
+    state: restarted
+  when:
+    - k3s_active.rc == 0
+    - (k3s_install is changed) or (k3s_config is changed)
+
+# ------------------------------------------------------------ your user and Podman
+
+- name: Create ~/.kube for {{ desktop_user }}
+  ansible.builtin.file:
+    path: "{{ k3s_kubeconfig_path | dirname }}"
+    state: directory
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0700"
+
+# k3s writes its (root-only) kubeconfig the first time it starts. If it has
+# started before, give your user a copy; `homelab up k3s` also refreshes it.
+- name: Look for k3s's kubeconfig
+  ansible.builtin.stat:
+    path: /etc/rancher/k3s/k3s.yaml
+  register: k3s_kubeconfig_source
+
+- name: Give the desktop user a copy of the kubeconfig
+  ansible.builtin.copy:
+    src: /etc/rancher/k3s/k3s.yaml
+    dest: "{{ k3s_kubeconfig_path }}"
+    remote_src: true
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0600"
+  diff: false  # contains the cluster's client credentials
+  when: k3s_kubeconfig_source.stat.exists
+
+# No `backup: true`: ~/.bashrc.d/* is sourced, so a backup copy would be loaded too.
+- name: Install the k3s shell helpers (KUBECONFIG, k3s-load)
+  ansible.builtin.template:
+    src: k3s.sh.j2
+    dest: "/home/{{ desktop_user }}/.bashrc.d/k3s.sh"
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0644"

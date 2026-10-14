@@ -5,9 +5,23 @@
 #   ansible-playbook site.yml
 #   ansible-playbook site.yml --ask-become-pass   # if passwordless sudo isn't set up
 #
+# Install one piece (or a few) on its own - every role is tagged with its name:
+#   ansible-playbook site.yml --tags k3s
+#   ansible-playbook site.yml --tags forgejo,monitoring
+#   ansible-playbook site.yml --skip-tags k3s     # everything except k3s
+#   ansible-playbook site.yml --list-tags         # what can be selected
+#
+# Roles that need another one declare it themselves (podman_desktop and
+# obsidian pull in flatpak_setup; k3s and homelab pull in bashrc_loader), so
+# --tags always works on its own. monitoring adapts: its Pushgateway is only
+# set up when Forgejo is installed (re-run --tags monitoring after adding it).
+#
+# The `homelab` command does not depend on what this playbook ran: it asks
+# systemd what is installed each time you use it.
+#
 # Add new software by:
 #   1. Creating a new role under roles/<name>/tasks/main.yml
-#   2. Adding it to the `roles:` list below
+#   2. Adding it, with its tag, to the `roles:` list below
 
 - name: Provision workstation software
   hosts: workstation
@@ -15,17 +29,18 @@
   gather_facts: true
 
   roles:
-    - flatpak_setup
-    - podman_desktop
-    - vim
-    - vscodium
-    - keepassxc
-    - mkcert
-    - forgejo
+    - { role: flatpak_setup, tags: [flatpak_setup] }
+    - { role: podman_desktop, tags: [podman_desktop] }
+    - { role: vim, tags: [vim] }
+    - { role: vscodium, tags: [vscodium] }
+    - { role: keepassxc, tags: [keepassxc] }
+    - { role: mkcert, tags: [mkcert] }
+    - { role: forgejo, tags: [forgejo] }
     - role: monitoring
+      tags: [monitoring]
       when: monitoring_enabled | default(false) | bool
-    - obsidian
-    - todotxt
-    - devpod
-    # Last: the `homelab` command needs to know which of the above got installed.
-    - homelab
+    - { role: k3s, tags: [k3s] }
+    - { role: obsidian, tags: [obsidian] }
+    - { role: todotxt, tags: [todotxt] }
+    - { role: devpod, tags: [devpod] }
+    - { role: homelab, tags: [homelab] }
