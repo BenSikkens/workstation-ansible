@@ -1,0 +1,49 @@
+---
+# 1. Run the application as a rootless Podman container (Quadlet).
+# 2. Tell the monitoring stack about it (monitoring.yml).
+
+- name: Create the Quadlet directory for {{ demo_metrics_user }}
+  ansible.builtin.file:
+    path: "/home/{{ demo_metrics_user }}/.config/containers/systemd"
+    state: directory
+    owner: "{{ demo_metrics_user }}"
+    group: "{{ demo_metrics_user }}"
+    mode: "0755"
+
+- name: Look up the user's uid
+  ansible.builtin.command: "id -u {{ demo_metrics_user }}"
+  register: demo_metrics_uid
+  changed_when: false
+
+- name: Deploy the Quadlet unit
+  ansible.builtin.template:
+    src: demo-metrics.container.j2
+    dest: "/home/{{ demo_metrics_user }}/.config/containers/systemd/demo-metrics.container"
+    owner: "{{ demo_metrics_user }}"
+    group: "{{ demo_metrics_user }}"
+    mode: "0644"
+  register: demo_metrics_quadlet
+
+- name: Reload the user's systemd units  # noqa: no-handler
+  ansible.builtin.systemd:
+    daemon_reload: true
+    scope: user
+  become: true
+  become_user: "{{ demo_metrics_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ demo_metrics_uid.stdout }}"
+  when: demo_metrics_quadlet.changed
+
+- name: Start the application
+  ansible.builtin.systemd:
+    name: demo-metrics.service
+    scope: user
+    state: "{{ 'restarted' if demo_metrics_quadlet.changed else 'started' }}"
+    enabled: true
+  become: true
+  become_user: "{{ demo_metrics_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ demo_metrics_uid.stdout }}"
+
+- name: Register the application with the monitoring stack
+  ansible.builtin.include_tasks: monitoring.yml

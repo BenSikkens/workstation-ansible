@@ -13,3 +13,16 @@ providers:
     updateIntervalSeconds: 60
     options:
       path: /var/lib/grafana-dashboards
+
+  # Dashboards that other roles register with the monitor_app role: one
+  # sub-directory per application, shown as a Grafana folder of that name.
+  # Removing a file removes the dashboard (the files are the source of truth).
+  - name: apps
+    orgId: 1
+    type: file
+    disableDeletion: false
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana-app-dashboards
+      foldersFromFilesStructure: true

@@ -63,6 +63,7 @@
     - "{{ monitoring_config_dir }}/grafana-provisioning/datasources"
     - "{{ monitoring_config_dir }}/grafana-provisioning/dashboards"
     - "{{ monitoring_config_dir }}/dashboards"
+    - "{{ monitoring_config_dir }}/app-dashboards"   # dashboards other roles register (monitor_app)
 
 - name: Render the Prometheus config
   ansible.builtin.template:

@@ -448,6 +448,14 @@ ports, retention (`monitoring_prometheus_retention`,
 users are watched). To skip all of it set `monitoring_enabled: false` in
 `group_vars/all.yml`; nothing already installed is removed.
 
+##### Monitoring other applications
+
+Containers you run under `git` or your own user, and anything that logs to the
+journal, are monitored automatically. An application's *own* metrics need a
+one-time registration, and Grafana dashboards can be added from files or built
+in the UI. Everything, including a complete worked example
+(`examples/demo_metrics/`), is in **[MONITORING-APPS.md](MONITORING-APPS.md)**.
+
 ##### Not covered
 
 - Monitoring data is **not** part of the Forgejo backup (`forgejo-backup.yml`).

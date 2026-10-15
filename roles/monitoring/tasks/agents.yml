@@ -80,7 +80,7 @@
 # is not installed).
 - name: Look up the uids of the users whose Podman is monitored
   ansible.builtin.command: "id -u {{ item.user }}"
-  loop: "{{ monitoring_podman_exporters }}"
+  loop: "{{ monitoring_podman_exporters + monitoring_podman_exporters_extra }}"
   loop_control:
     label: "{{ item.user }}"
   register: monitoring_exporter_uids
@@ -177,6 +177,16 @@
       - systemd-journal
     append: true
   register: monitoring_alloy_groups
+
+# Applications register scrape targets here (see the monitor_app role). Alloy
+# re-reads the directory every 30 seconds, so no restart is needed.
+- name: Create the directory applications drop scrape targets into
+  ansible.builtin.file:
+    path: /etc/alloy/targets.d
+    state: directory
+    owner: root
+    group: alloy
+    mode: "0755"
 
 - name: Render the Alloy configuration
   ansible.builtin.template:

@@ -1,0 +1,14 @@
+---
+# Example role: a container that serves Prometheus metrics, registered with the
+# monitoring stack. Copy it to roles/ to try it (see MONITORING-APPS.md).
+#
+# The "application" is prom/statsd-exporter, only because it is a small image
+# that serves metrics on /metrics out of the box. Swap the image, the ports and
+# the dashboard for your own application.
+demo_metrics_image: "docker.io/prom/statsd-exporter:v0.31.0"
+# Host port (loopback only) the metrics are published on. Alloy runs on the
+# host, so this is the address it scrapes.
+demo_metrics_port: 9102
+# Runs under your desktop user's rootless Podman, which the monitoring stack
+# already watches (Containers dashboard, logs). Use a service user for a real app.
+demo_metrics_user: "{{ desktop_user }}"

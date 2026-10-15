@@ -36,6 +36,12 @@ monitoring_podman_exporters:
     port: 9882
   - user: "{{ desktop_user }}"
     port: 9883
+# Add the rootless-Podman users of applications you install, one entry each
+# with a free port, e.g. in group_vars/all.yml:
+#   monitoring_podman_exporters_extra:
+#     - {user: nextcloud, port: 9884}
+# then run `ansible-playbook site.yml --tags monitoring`.
+monitoring_podman_exporters_extra: []
 
 # Where the monitoring user keeps its generated config (bind-mounted read-only).
 monitoring_config_dir: "/home/{{ monitoring_user }}/monitoring-config"

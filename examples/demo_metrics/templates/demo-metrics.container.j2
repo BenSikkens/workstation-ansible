@@ -1,0 +1,16 @@
+# Managed by Ansible (role demo_metrics).
+[Unit]
+Description=Demo application that serves Prometheus metrics
+
+[Container]
+Image={{ demo_metrics_image }}
+ContainerName=demo-metrics
+# Loopback only: nothing on the network can reach it, but Alloy (on this
+# machine) can. This line is what makes the metrics scrapeable.
+PublishPort=127.0.0.1:{{ demo_metrics_port }}:9102
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target

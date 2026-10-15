@@ -5,6 +5,7 @@
 //   * host metrics (CPU, memory, disk, network)          -> Prometheus
 //   * per-container metrics from each Podman exporter    -> Prometheus
 //   * CI scan results held by the Pushgateway            -> Prometheus
+//   * metrics of applications that registered themselves -> Prometheus
 //   * the systemd journal (incl. container logs)         -> Loki
 // Everything stays on 127.0.0.1.
 
@@ -46,6 +47,31 @@ prometheus.scrape "pushgateway" {
 }
 
 {% endif %}
+// --- applications that register themselves ---
+// Each file in /etc/alloy/targets.d/ lists endpoints that serve Prometheus
+// metrics (written by the monitor_app role, or by hand; Prometheus file_sd
+// format). The `app` label becomes the `job` label.
+discovery.file "apps" {
+  files            = ["/etc/alloy/targets.d/*.yml", "/etc/alloy/targets.d/*.yaml", "/etc/alloy/targets.d/*.json"]
+  refresh_interval = "30s"
+}
+
+discovery.relabel "apps" {
+  targets = discovery.file.apps.targets
+
+  rule {
+    source_labels = ["app"]
+    regex         = "(.+)"
+    target_label  = "job"
+  }
+}
+
+prometheus.scrape "apps" {
+  targets         = discovery.relabel.apps.output
+  scrape_interval = "30s"
+  forward_to      = [prometheus.remote_write.local.receiver]
+}
+
 // --- logs from the systemd journal (system, user services, containers) ---
 loki.relabel "journal" {
   forward_to = []
