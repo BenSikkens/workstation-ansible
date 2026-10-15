@@ -1,0 +1,8 @@
+# Managed by Ansible (role monitor_app) for '{{ monitor_app_name }}'. Remove it
+# with monitor_app_state: absent. Prometheus file_sd format, read by Alloy.
+{{ [{
+  'targets': monitor_app_targets,
+  'labels': ({'app': monitor_app_name,
+              '__metrics_path__': monitor_app_metrics_path,
+              '__scheme__': monitor_app_scheme} | combine(monitor_app_labels))
+}] | to_nice_yaml }}

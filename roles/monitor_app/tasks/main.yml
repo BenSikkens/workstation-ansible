@@ -1,0 +1,93 @@
+---
+- name: Check the arguments
+  ansible.builtin.assert:
+    that:
+      - monitor_app_name is match('^[a-z][a-z0-9_-]*$')
+      - monitor_app_state in ['present', 'absent']
+      - monitor_app_targets | length > 0 or monitor_app_dashboards | length > 0 or monitor_app_state == 'absent'
+    fail_msg: >-
+      monitor_app needs monitor_app_name (lowercase letters, digits, - and _) and at
+      least one of monitor_app_targets / monitor_app_dashboards.
+    quiet: true
+
+- name: Look for the monitoring stack (dashboards and Alloy target directories)
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ monitor_app_config_dir }}/app-dashboards"
+    - "{{ monitor_app_targets_dir }}"
+  register: monitor_app_dirs
+
+- name: Work out what is installed
+  ansible.builtin.set_fact:
+    monitor_app_has_grafana: "{{ monitor_app_dirs.results[0].stat.exists }}"
+    monitor_app_has_alloy: "{{ monitor_app_dirs.results[1].stat.exists }}"
+
+- name: Say that the application could not be registered
+  ansible.builtin.debug:
+    msg: >-
+      Monitoring is not installed (no {{ monitor_app_config_dir }}/app-dashboards or
+      {{ monitor_app_targets_dir }}), so '{{ monitor_app_name }}' was not registered. Install it
+      (ansible-playbook site.yml --tags monitoring), then run this application's role again.
+  when: not (monitor_app_has_grafana | bool) and not (monitor_app_has_alloy | bool)
+
+# ----------------------------------------------------------------- scrape target
+
+- name: Register the application's metrics endpoints with Alloy
+  ansible.builtin.template:
+    src: targets.yml.j2
+    dest: "{{ monitor_app_targets_dir }}/{{ monitor_app_name }}.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - monitor_app_state == 'present'
+    - monitor_app_targets | length > 0
+    - monitor_app_has_alloy | bool
+
+- name: Remove the metrics endpoints of {{ monitor_app_name }}
+  ansible.builtin.file:
+    path: "{{ monitor_app_targets_dir }}/{{ monitor_app_name }}.yml"
+    state: absent
+  when:
+    - monitor_app_state == 'absent'
+    - monitor_app_has_alloy | bool
+
+# --------------------------------------------------------------------- dashboards
+
+- name: Create the Grafana folder for {{ monitor_app_name }}
+  ansible.builtin.file:
+    path: "{{ monitor_app_config_dir }}/app-dashboards/{{ monitor_app_name }}"
+    state: directory
+    owner: "{{ monitor_app_user }}"
+    group: "{{ monitor_app_user }}"
+    mode: "0755"
+  when:
+    - monitor_app_state == 'present'
+    - monitor_app_dashboards | length > 0
+    - monitor_app_has_grafana | bool
+
+# Grafana's container user reads these through "other" permissions, hence 0644.
+- name: Install the application's dashboards
+  ansible.builtin.copy:
+    content: >-
+      {{ (lookup('ansible.builtin.file', item) | regex_replace('\$\{DS_PROMETHEUS[A-Z_]*\}', 'prometheus') | regex_replace('\$\{DS_LOKI[A-Z_]*\}', 'loki'))
+         if monitor_app_fix_datasources | bool else lookup('ansible.builtin.file', item) }}
+    dest: "{{ monitor_app_config_dir }}/app-dashboards/{{ monitor_app_name }}/{{ item | basename }}"
+    owner: "{{ monitor_app_user }}"
+    group: "{{ monitor_app_user }}"
+    mode: "0644"
+  loop: "{{ monitor_app_dashboards }}"
+  loop_control:
+    label: "{{ item | basename }}"
+  when:
+    - monitor_app_state == 'present'
+    - monitor_app_has_grafana | bool
+
+- name: Remove the dashboards of {{ monitor_app_name }}
+  ansible.builtin.file:
+    path: "{{ monitor_app_config_dir }}/app-dashboards/{{ monitor_app_name }}"
+    state: absent
+  when:
+    - monitor_app_state == 'absent'
+    - monitor_app_has_grafana | bool

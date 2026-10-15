@@ -1,0 +1,45 @@
+---
+# monitor_app: registers ONE application with the monitoring stack. It is not
+# listed in site.yml; other roles call it (see README, "Monitoring other
+# applications"):
+#
+#   - name: Monitor myapp
+#     ansible.builtin.include_role:
+#       name: monitor_app
+#     vars:
+#       monitor_app_name: myapp
+#       monitor_app_targets: ["127.0.0.1:9100"]
+#       monitor_app_dashboards: ["{{ role_path }}/files/myapp-dashboard.json"]
+#
+# It only writes files: a scrape-target file for Alloy and dashboard JSON for
+# Grafana, both picked up automatically within about 30 seconds. If the
+# monitoring role has not been run yet it does nothing (and says so); run it
+# again after installing monitoring.
+
+# Required: a short lowercase name. It becomes the `app`/`job` label, the
+# Grafana folder and the file names.
+monitor_app_name: ""
+
+# present = register; absent = remove this application's target file and dashboards.
+monitor_app_state: present
+
+# Endpoints serving Prometheus metrics, as "host:port" as seen from this machine
+# (Alloy runs on the host). Containers must publish their metrics port on the
+# host, e.g. PublishPort=127.0.0.1:9100:9100.
+monitor_app_targets: []
+monitor_app_metrics_path: /metrics
+monitor_app_scheme: http
+# Extra labels on every series, e.g. {env: home}.
+monitor_app_labels: {}
+
+# Grafana dashboard JSON files on THIS machine (paths in your role). Dashboards
+# exported from grafana.com refer to their data source as ${DS_PROMETHEUS} or
+# ${DS_LOKI}; with the option below those are pointed at this stack's data
+# sources (uids `prometheus` and `loki`) so they work when provisioned.
+monitor_app_dashboards: []
+monitor_app_fix_datasources: true
+
+# Where the stack keeps things (match the monitoring role's defaults).
+monitor_app_user: "{{ monitoring_user | default('monitoring') }}"
+monitor_app_config_dir: "/home/{{ monitor_app_user }}/monitoring-config"
+monitor_app_targets_dir: /etc/alloy/targets.d
