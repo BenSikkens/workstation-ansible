@@ -188,6 +188,23 @@
     group: alloy
     mode: "0755"
 
+- name: Look for the kubeconfig of the cv-microfrontend collector
+  ansible.builtin.stat:
+    path: "{{ monitoring_k3s_cv_kubeconfig }}"
+  register: monitoring_k3s_cv_kubeconfig_stat
+
+- name: Decide whether the k3s cv-microfrontend collection is added
+  ansible.builtin.set_fact:
+    monitoring_k3s_cv_enabled: "{{ monitoring_k3s_cv_kubeconfig_stat.stat.exists }}"
+
+- name: Explain why the k3s cv-microfrontend collection is left out
+  ansible.builtin.debug:
+    msg: >-
+      {{ monitoring_k3s_cv_kubeconfig }} does not exist, so Alloy does not collect the
+      cv-microfrontend pods on k3s. Create it (scripts/metrics-kubeconfig.sh in the CV project,
+      readable by the alloy user) and run the monitoring role again.
+  when: not monitoring_k3s_cv_enabled
+
 - name: Render the Alloy configuration
   ansible.builtin.template:
     src: config.alloy.j2

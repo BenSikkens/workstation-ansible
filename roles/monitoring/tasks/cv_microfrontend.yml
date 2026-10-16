@@ -1,0 +1,22 @@
+---
+# Installs the cv-microfrontend Grafana dashboard through the monitor_app
+# helper. Skipped (with a message) when the dashboard file is not there, so a
+# machine without that repository still gets a working monitoring role.
+- name: Look for the cv-microfrontend dashboard
+  ansible.builtin.stat:
+    path: "{{ monitoring_cv_dashboard }}"
+  register: monitoring_cv_dashboard_stat
+
+- name: Say that the cv-microfrontend dashboard is skipped
+  ansible.builtin.debug:
+    msg: "{{ monitoring_cv_dashboard }} does not exist, so the cv-microfrontend dashboard is not installed."
+  when: not monitoring_cv_dashboard_stat.stat.exists
+
+- name: Monitor cv-microfrontend
+  ansible.builtin.include_role:
+    name: monitor_app
+  vars:
+    monitor_app_name: cv-microfrontend
+    monitor_app_dashboards:
+      - "{{ monitoring_cv_dashboard }}"
+  when: monitoring_cv_dashboard_stat.stat.exists

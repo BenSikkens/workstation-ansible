@@ -49,3 +49,18 @@ monitoring_config_dir: "/home/{{ monitoring_user }}/monitoring-config"
 # Grafana Alloy (the host agent): installed from Grafana's RPM repository.
 monitoring_alloy_repo_baseurl: "https://rpm.grafana.com"
 monitoring_alloy_repo_gpgkey: "https://rpm.grafana.com/gpg.key"
+
+# cv-microfrontend on k3s: Alloy scrapes the pods' metrics and reads their logs
+# through the Kubernetes API with a read-only service account. Collection is
+# switched on automatically when this kubeconfig exists (readable by the alloy
+# user; create it with the CV project's scripts/metrics-kubeconfig.sh). Without
+# the file nothing is added to the Alloy config.
+monitoring_k3s_cv_kubeconfig: /etc/alloy/k3s-cv-metrics.kubeconfig
+monitoring_k3s_cv_namespace: cv-microfrontend
+# The pods' metrics port. Discovery lists it as a second port of the container,
+# so it is dropped from the log targets to read each log once.
+monitoring_k3s_cv_metrics_port: 9100
+
+# Dashboard of the CV application, installed as a Grafana folder
+# "cv-microfrontend" when the file exists (see tasks/cv_microfrontend.yml).
+monitoring_cv_dashboard: "/home/{{ desktop_user }}/Repositories/cv-microfrontend/monitoring/cv-application-dashboard.json"

@@ -440,6 +440,18 @@ Notes:
 - `SCAN_REPORT_DRY_RUN=1 scan-report trivy trivy.json` prints what would be
   sent.
 
+##### cv-microfrontend on k3s
+
+If `/etc/alloy/k3s-cv-metrics.kubeconfig` exists when the monitoring role runs,
+Alloy also collects the `cv-microfrontend` namespace of k3s: metrics from pods
+annotated `prometheus.io/scrape: "true"` (job `k3s-pods`, scraped on the pod IP)
+and all container logs (Loki label `source="k3s"`). Without the file nothing is
+added. Create the file with the CV project's `scripts/metrics-kubeconfig.sh`;
+it must be readable by the `alloy` user (for example `root:alloy`, mode `0640`).
+Then run `ansible-playbook site.yml --tags monitoring --ask-become-pass`.
+Namespace, kubeconfig path and metrics port are `monitoring_k3s_cv_*` in
+`roles/monitoring/defaults/main.yml`. k3s must be running (`homelab up k3s`).
+
 ##### Settings
 
 Defaults live in `roles/monitoring/defaults/main.yml`: image versions,

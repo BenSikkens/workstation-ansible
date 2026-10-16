@@ -6,6 +6,7 @@
 //   * per-container metrics from each Podman exporter    -> Prometheus
 //   * CI scan results held by the Pushgateway            -> Prometheus
 //   * metrics of applications that registered themselves -> Prometheus
+//   * cv-microfrontend pods on k3s (metrics and logs)    -> Prometheus, Loki
 //   * the systemd journal (incl. container logs)         -> Loki
 // Everything stays on 127.0.0.1.
 
@@ -113,3 +114,125 @@ loki.write "local" {
     url = "http://127.0.0.1:{{ monitoring_loki_port }}/loki/api/v1/push"
   }
 }
+
+{% if monitoring_k3s_cv_enabled | default(false) | bool %}
+// cv-microfrontend -- collecting the CV application on k3s. Uses the
+// `prometheus.remote_write "local"` and `loki.write "local"` above and adds
+// nothing that listens on a port.
+//
+// Needs {{ monitoring_k3s_cv_kubeconfig }}, readable by the alloy user: the
+// read-only `cv-metrics-reader` account of the namespace (list/watch pods,
+// read their logs). Pod IPs (10.42.x.x) are reachable from the host, so Alloy
+// scrapes the pods directly -- no NodePort, no hostPort.
+
+// --- which pods exist (shared by metrics and logs) ---
+discovery.kubernetes "k3s_cv_pods" {
+  role            = "pod"
+  kubeconfig_file = "{{ monitoring_k3s_cv_kubeconfig }}"
+
+  // The account can only see its own namespace, so discovery must be
+  // limited to it as well.
+  namespaces {
+    names = ["{{ monitoring_k3s_cv_namespace }}"]
+  }
+}
+
+// --- metrics ---
+// Pods say where their metrics are with annotations:
+//   prometheus.io/scrape: "true", prometheus.io/port, prometheus.io/path
+discovery.relabel "k3s_cv_metrics" {
+  targets = discovery.kubernetes.k3s_cv_pods.targets
+
+  rule {
+    source_labels = ["__meta_kubernetes_pod_annotation_prometheus_io_scrape"]
+    regex         = "true"
+    action        = "keep"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_pod_phase"]
+    regex         = "Running"
+    action        = "keep"
+  }
+  // Discovery gives one target per container port; all of a pod's
+  // targets become the same podIP:<annotated port>, and identical
+  // targets are scraped once.
+  rule {
+    source_labels = ["__meta_kubernetes_pod_ip", "__meta_kubernetes_pod_annotation_prometheus_io_port"]
+    regex         = "(.+);(\\d+)"
+    replacement   = "$1:$2"
+    target_label  = "__address__"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_pod_annotation_prometheus_io_path"]
+    regex         = "(.+)"
+    target_label  = "__metrics_path__"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_namespace"]
+    target_label  = "namespace"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_pod_name"]
+    target_label  = "pod"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_pod_label_app"]
+    target_label  = "app"
+  }
+  rule {
+    target_label = "job"
+    replacement  = "k3s-pods"
+  }
+}
+
+prometheus.scrape "k3s_cv_metrics" {
+  targets         = discovery.relabel.k3s_cv_metrics.output
+  scrape_interval = "30s"
+  forward_to      = [prometheus.remote_write.local.receiver]
+}
+
+// --- logs ---
+// Container logs through the Kubernetes API (k3s writes them to
+// /var/log/pods, which only root can read). One stream per container.
+discovery.relabel "k3s_cv_logs" {
+  targets = discovery.kubernetes.k3s_cv_pods.targets
+
+  // A container with two ports is discovered twice; the metrics port
+  // is the duplicate, so drop it to read each log once.
+  rule {
+    source_labels = ["__meta_kubernetes_pod_container_port_number"]
+    regex         = "{{ monitoring_k3s_cv_metrics_port }}"
+    action        = "drop"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_namespace"]
+    target_label  = "namespace"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_pod_name"]
+    target_label  = "pod"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_pod_container_name"]
+    target_label  = "container"
+  }
+  rule {
+    source_labels = ["__meta_kubernetes_pod_label_app"]
+    target_label  = "app"
+  }
+  // Next to the journal's source="journal" in the workstation's Loki.
+  rule {
+    target_label = "source"
+    replacement  = "k3s"
+  }
+}
+
+loki.source.kubernetes "k3s_cv_logs" {
+  targets    = discovery.relabel.k3s_cv_logs.output
+  forward_to = [loki.write.local.receiver]
+
+  client {
+    kubeconfig_file = "{{ monitoring_k3s_cv_kubeconfig }}"
+  }
+}
+{% endif %}

@@ -243,3 +243,8 @@
 # The Pushgateway, the Podman exporters and the Alloy host agent.
 - name: Set up the monitoring agents
   ansible.builtin.include_tasks: agents.yml
+
+# The CV application's own dashboard, kept in its repository. The collection
+# itself (pod metrics and logs) is the k3s block in config.alloy.j2.
+- name: Add the cv-microfrontend dashboard
+  ansible.builtin.include_tasks: cv_microfrontend.yml
