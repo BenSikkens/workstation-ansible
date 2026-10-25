@@ -7,3 +7,24 @@ homelab_forgejo_http_port: "{{ forgejo_http_port | default(3000) }}"
 homelab_monitoring_user: "{{ monitoring_user | default('monitoring') }}"
 homelab_grafana_port: "{{ monitoring_grafana_port | default(3001) }}"
 homelab_k3s_kubeconfig: "{{ k3s_kubeconfig_path | default('/home/' ~ desktop_user ~ '/.kube/k3s.yaml') }}"
+
+# --- who may run `homelab` without a password -------------------------------
+# Members of this group get passwordless sudo for the exact command lines the
+# homelab command needs, and nothing else (/etc/sudoers.d/homelab, generated
+# from templates/homelab.sudoers.j2). Everyone else is asked for a password, as
+# before. Users added here must log out and in again for the group to apply.
+homelab_group: homelab
+homelab_users:
+  - "{{ desktop_user }}"
+
+# Paths the k3s part of `homelab` uses (the k3s installer puts them here).
+homelab_k3s_bin: /usr/local/bin/k3s
+homelab_k3s_killall: /usr/local/bin/k3s-killall.sh
+homelab_k3s_kubeconfig_src: /etc/rancher/k3s/k3s.yaml
+
+# `homelab up k3s` copies the cluster-admin kubeconfig to your own ~/.kube.
+# Passwordless access to that file is the one rule here that is effectively
+# root: whoever holds the cluster-admin credential can start a privileged pod.
+# Set to false to drop it (the copy then fails with a message and you run
+# `sudo cat` yourself with a password).
+homelab_sudo_k3s_kubeconfig: true

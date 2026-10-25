@@ -62,6 +62,10 @@
     owner: "{{ monitor_app_user }}"
     group: "{{ monitor_app_user }}"
     mode: "0755"
+    # Grafana runs in a container; under SELinux it can only read container_file_t.
+    # The :Z mount relabels once, at container start, so files added later need the
+    # label set here.
+    setype: container_file_t
   when:
     - monitor_app_state == 'present'
     - monitor_app_dashboards | length > 0
@@ -77,6 +81,7 @@
     owner: "{{ monitor_app_user }}"
     group: "{{ monitor_app_user }}"
     mode: "0644"
+    setype: container_file_t
   loop: "{{ monitor_app_dashboards }}"
   loop_control:
     label: "{{ item | basename }}"

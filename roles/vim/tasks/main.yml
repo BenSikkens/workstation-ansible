@@ -1,9 +1,21 @@
 ---
 # Fedora Workstation ships with only a minimal 'vi' alias by default;
-# this installs the full vim package.
+# this installs the full vim package and makes vim the default editor.
 
 - name: Install vim (RedHat family)
   ansible.builtin.dnf:
     name: vim-enhanced
     state: present
+  when: ansible_facts['os_family'] == "RedHat"
+
+# Fedora's way of choosing the default editor is a package that sets EDITOR
+# for every login shell (/etc/profile.d/vim-default-editor.sh). It conflicts
+# with nano-default-editor, which Workstation installs by default, so dnf
+# swaps the two (allowerasing). Only that small profile package is removed;
+# nano itself stays installed. Takes effect in new login shells.
+- name: Make vim the default editor (replaces nano-default-editor)
+  ansible.builtin.dnf:
+    name: vim-default-editor
+    state: present
+    allowerasing: true
   when: ansible_facts['os_family'] == "RedHat"

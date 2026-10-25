@@ -128,7 +128,7 @@ To make a role portable to Debian/Arch/etc. later, either:
 | Role | Software | Install method |
 |---|---|---|
 | `podman_desktop` | Podman Desktop | Flatpak (Flathub) |
-| `vim` | Vim (vim-enhanced) | dnf |
+| `vim` | Vim (vim-enhanced), set as the default editor (`EDITOR`) | dnf; swaps out `nano-default-editor` |
 | `vscodium` | VSCodium | dnf (official VSCodium RPM repo) |
 | `keepassxc` | KeePassXC | dnf |
 | `mkcert` | mkcert | dnf |
@@ -302,10 +302,40 @@ the ports in the printed URLs, are written by Ansible.)
 when stopped, so it is usable in scripts. A group counts as running when its
 core units are up (Forgejo + runner; Prometheus, Loki, Grafana and Alloy;
 k3s); the Pushgateway and the Podman exporters are listed but do not make a
-group "degraded" on their own. Tab completion is included. It uses `sudo` to
-reach the service users' systemd instances, so expect a password prompt. The
-command only appears in **new** shells; in an open terminal run
+group "degraded" on their own. Tab completion is included. The command only
+appears in **new** shells; in an open terminal run
 `source ~/.bashrc.d/homelab.sh`.
+
+##### Who may use it without a password
+
+It needs `sudo` to reach the service users' systemd instances and to run k3s.
+The `homelab` role creates a group (`homelab_group`, default `homelab`), adds
+the users in `homelab_users` (default: `desktop_user`; log out and in once for
+a new membership to apply) and installs `/etc/sudoers.d/homelab`. Members get
+passwordless sudo for the exact command lines `homelab` uses and nothing else;
+everyone else is asked for a password as before. The rules are generated from
+`roles/homelab/vars/main.yml`, one entry per unit and verb, and `visudo`
+checks the file before it is installed.
+
+What members can do: start, stop and read the status of the listed units
+(Forgejo, runner, Podman socket, Pushgateway, exporter, Prometheus, Loki,
+Grafana, Alloy, k3s); list and stop `git`'s running containers; run
+`k3s-killall.sh` and `k3s kubectl get --raw=/readyz`. They cannot edit units,
+run other commands as the service users, or start new containers.
+
+Two things to know:
+
+- The rules pin the service users' uid, so a user that does not exist yet gets
+  no rules. After installing Forgejo or monitoring, run
+  `ansible-playbook site.yml --tags homelab --ask-become-pass` once.
+- `homelab up k3s` copies the cluster-admin kubeconfig, so one rule (`cat` of
+  `/etc/rancher/k3s/k3s.yaml`) is effectively root: whoever holds that
+  credential can start a privileged pod. Members of the group should be people
+  you would give root to anyway. Set `homelab_sudo_k3s_kubeconfig: false` to
+  drop that rule; the kubeconfig copy then asks for a password instead.
+
+If you change what `homelab` runs through sudo, update the unit table in
+`roles/homelab/vars/main.yml` as well.
 
 Details worth knowing:
 

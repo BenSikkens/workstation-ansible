@@ -15,9 +15,13 @@
 # that is not installed is skipped (`all`) or reported (named scope).
 #
 # The containers run as rootless Podman under their own service users, and k3s
-# is a system service, so this uses sudo. Managed by Ansible
-# (roles/homelab/templates/homelab.sh.j2). Local edits are overwritten on the
-# next playbook run.
+# is a system service, so this uses sudo. Every privileged call is ONE fixed
+# command (one unit per call, no shell tricks), because the sudoers rules the
+# homelab role installs (/etc/sudoers.d/homelab, group "{{ homelab_group }}") allow
+# exactly those command lines and nothing else. Add a privileged call here and
+# the rules in roles/homelab/templates/homelab.sudoers.j2 must learn it too.
+# Managed by Ansible (roles/homelab/templates/homelab.sh.j2). Local edits are
+# overwritten on the next playbook run.
 
 # Settings only (who runs what, what URLs to print), not install state.
 HOMELAB_FORGEJO_USER="{{ homelab_forgejo_user }}"
@@ -25,9 +29,10 @@ HOMELAB_MONITORING_USER="{{ homelab_monitoring_user }}"
 HOMELAB_WEB_URL="http://localhost:{{ homelab_forgejo_http_port }}"
 HOMELAB_GRAFANA_URL="http://localhost:{{ homelab_grafana_port }}"
 HOMELAB_K3S_KUBECONFIG="{{ homelab_k3s_kubeconfig }}"
+HOMELAB_K3S_BIN="{{ homelab_k3s_bin }}"
+HOMELAB_K3S_KUBECONFIG_SRC="{{ homelab_k3s_kubeconfig_src }}"
+HOMELAB_K3S_KILLALL="{{ homelab_k3s_killall }}"
 {% raw %}
-HOMELAB_K3S_KUBECONFIG_SRC=/etc/rancher/k3s/k3s.yaml
-HOMELAB_K3S_KILLALL=/usr/local/bin/k3s-killall.sh
 
 # Groups and their units. A unit is "<owner>:<name>": owner is a user (that
 # user's systemd --user instance) or the word "system". The first unit of a
@@ -89,46 +94,33 @@ _homelab_title() {
   esac
 }
 
-# Ask systemd about <spec>... : one call per owner. Fills _HL_LOAD/_HL_ACTIVE.
+# Ask systemd about one "<owner>:<name>" spec -> _HL_LOAD/_HL_ACTIVE. One unit
+# per call, so that each sudo call is a fixed command line.
+_homelab_probe_one() {
+  local spec=$1 owner name out line
+  owner=${spec%%:*}
+  name=${spec#*:}
+  if [ "$owner" = system ]; then
+    out=$(systemctl show -p LoadState -p ActiveState "$name" 2>/dev/null) || return 0
+  else
+    id -u "$owner" >/dev/null 2>&1 || return 0   # user not created = nothing installed for it
+    out=$(_homelab_as_user "$owner" systemctl --user show -p LoadState -p ActiveState "$name" 2>/dev/null) || return 0
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      LoadState=*) _HL_LOAD[$spec]=${line#*=} ;;
+      ActiveState=*) _HL_ACTIVE[$spec]=${line#*=} ;;
+    esac
+  done <<<"$out"
+}
+
+# Fills _HL_LOAD/_HL_ACTIVE for every spec given.
 _homelab_probe() {
-  local spec owner o i line load active out
-  local -a owners=() mine=() names=()
+  local spec
   for spec in "$@"; do
     _HL_LOAD[$spec]=not-found
     _HL_ACTIVE[$spec]=inactive
-    owner=${spec%%:*}
-    case " ${owners[*]} " in *" $owner "*) ;; *) owners+=("$owner") ;; esac
-  done
-  for o in "${owners[@]}"; do
-    mine=() names=()
-    for spec in "$@"; do
-      if [ "${spec%%:*}" = "$o" ]; then
-        mine+=("$spec")
-        names+=("${spec#*:}")
-      fi
-    done
-    if [ "$o" = system ]; then
-      out=$(systemctl show -p LoadState -p ActiveState "${names[@]}" 2>/dev/null) || continue
-    else
-      id -u "$o" >/dev/null 2>&1 || continue   # user not created = nothing installed for it
-      out=$(_homelab_as_user "$o" systemctl --user show -p LoadState -p ActiveState "${names[@]}" 2>/dev/null) || continue
-    fi
-    i=0 load="" active=""
-    # `systemctl show` prints one block per unit, in the order asked, blank-line separated.
-    while IFS= read -r line; do
-      case "$line" in
-        LoadState=*) load=${line#*=} ;;
-        ActiveState=*) active=${line#*=} ;;
-        "")
-          if [ -n "$load$active" ] && [ "$i" -lt "${#mine[@]}" ]; then
-            _HL_LOAD[${mine[$i]}]=$load
-            _HL_ACTIVE[${mine[$i]}]=$active
-            i=$((i + 1))
-            load="" active=""
-          fi
-          ;;
-      esac
-    done <<<"$out"$'\n'
+    _homelab_probe_one "$spec"
   done
 }
 
@@ -172,26 +164,17 @@ _homelab_select() {
   return 0
 }
 
-# Start/stop/etc. the given specs that are installed, one systemctl call per owner.
+# Start/stop the given specs that are installed, one systemctl call per unit, in
+# the order given.
 _homelab_units_do() {
-  local verb=$1 spec owner rc=0
+  local verb=$1 spec rc=0
   shift
-  local -a owners=() names=() todo=()
   for spec in "$@"; do
     [ "${_HL_LOAD[$spec]:-}" = loaded ] || continue
-    todo+=("$spec")
-    owner=${spec%%:*}
-    case " ${owners[*]} " in *" $owner "*) ;; *) owners+=("$owner") ;; esac
-  done
-  for owner in "${owners[@]}"; do
-    names=()
-    for spec in "${todo[@]}"; do
-      [ "${spec%%:*}" = "$owner" ] && names+=("${spec#*:}")
-    done
-    if [ "$owner" = system ]; then
-      sudo systemctl "$verb" "${names[@]}" || rc=1
+    if [ "${spec%%:*}" = system ]; then
+      sudo systemctl "$verb" "${spec#*:}" || rc=1
     else
-      _homelab_as_user "$owner" systemctl --user "$verb" "${names[@]}" || rc=1
+      _homelab_as_user "${spec%%:*}" systemctl --user "$verb" "${spec#*:}" || rc=1
     fi
   done
   return "$rc"
@@ -279,7 +262,7 @@ _homelab_up_k3s() {
   _homelab_units_do start "system:k3s.service" || return 1
   echo "Waiting for the k3s API..."
   for i in $(seq 1 45); do
-    if sudo k3s kubectl get --raw=/readyz >/dev/null 2>&1; then ready=1; break; fi
+    if sudo "$HOMELAB_K3S_BIN" kubectl get --raw=/readyz >/dev/null 2>&1; then ready=1; break; fi
     sleep 2
   done
   if [ "$ready" -ne 1 ]; then
@@ -290,7 +273,7 @@ _homelab_up_k3s() {
   # The redirect deliberately runs as YOU (not under sudo) so the copy is yours.
   # shellcheck disable=SC2024
   ( umask 077 && mkdir -p "$(dirname "$HOMELAB_K3S_KUBECONFIG")" \
-    && sudo cat "$HOMELAB_K3S_KUBECONFIG_SRC" >"$HOMELAB_K3S_KUBECONFIG" ) \
+    && sudo /usr/bin/cat "$HOMELAB_K3S_KUBECONFIG_SRC" >"$HOMELAB_K3S_KUBECONFIG" ) \
     || echo "homelab: could not refresh $HOMELAB_K3S_KUBECONFIG" >&2
 }
 

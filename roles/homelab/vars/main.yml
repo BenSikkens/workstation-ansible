@@ -1,0 +1,29 @@
+---
+# The privileged calls `homelab` makes, which the sudoers file allows. Keep in
+# step with templates/homelab.sh.j2: one entry per unit and verb it uses.
+# Anything not listed here needs a password.
+
+# System units: sudo systemctl <verb> <unit>
+homelab_system_units:
+  k3s.service: [start, stop]
+  alloy.service: [start, stop]
+
+# User units of the service accounts:
+#   sudo -u <user> env XDG_RUNTIME_DIR=/run/user/<uid> systemctl --user <verb> <unit>
+# "show" is the status probe. podman.service is only ever stopped.
+homelab_user_units:
+  - user: "{{ homelab_forgejo_user }}"
+    podman: true  # also: podman ps / podman stop, for CI containers left behind
+    units:
+      forgejo.service: [show, start, stop]
+      forgejo-runner.service: [show, start, stop]
+      podman.socket: [show, start, stop]
+      podman.service: [show, stop]
+      pushgateway.service: [show, start, stop]
+      prometheus-podman-exporter.service: [show, start, stop]
+  - user: "{{ homelab_monitoring_user }}"
+    podman: false
+    units:
+      prometheus.service: [show, start, stop]
+      loki.service: [show, start, stop]
+      grafana.service: [show, start, stop]

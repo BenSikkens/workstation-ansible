@@ -33,3 +33,11 @@ forgejo_backup_enabled: true
 # listens on 127.0.0.1 only. Set to false to skip installing it; `homelab`
 # then manages only the Forgejo stack.
 monitoring_enabled: true
+
+# --- homelab command ------------------------------------------------------
+# Members of this group may run `homelab` without a sudo password (exact
+# commands only, see roles/homelab and the README). Add everyone who should be
+# able to; they must log out and in again once.
+# homelab_users:
+#   - "{{ desktop_user }}"
+#   - another_user

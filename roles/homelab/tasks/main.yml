@@ -22,3 +22,75 @@
     owner: "{{ desktop_user }}"
     group: "{{ desktop_user }}"
     mode: "0644"
+
+# ------------------------------------------------- group and passwordless sudo
+# Members of {{ homelab_group }} may run the exact commands `homelab` needs without a
+# password (see templates/homelab.sudoers.j2). Everything else still asks.
+- name: Create the group that may use homelab
+  ansible.builtin.group:
+    name: "{{ homelab_group }}"
+    state: present
+
+- name: Add the homelab users to that group
+  ansible.builtin.user:
+    name: "{{ item }}"
+    groups: "{{ homelab_group }}"
+    append: true
+  loop: "{{ homelab_users }}"
+
+# The rules pin the uid in /run/user/<uid>, so a service user that does not exist
+# yet gets no rules. Run this role again after installing Forgejo or monitoring.
+- name: Look up the service accounts that exist
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ item.user }}"
+    fail_key: false
+  loop: "{{ homelab_user_units }}"
+  loop_control:
+    label: "{{ item.user }}"
+  register: homelab_getent
+
+- name: Work out the accounts the sudoers file covers
+  ansible.builtin.set_fact:
+    homelab_sudo_accounts: >-
+      {{ homelab_sudo_accounts | default([]) + [item.item | combine({'uid': item.ansible_facts.getent_passwd[item.item.user][1]})] }}
+  loop: "{{ homelab_getent.results }}"
+  loop_control:
+    label: "{{ item.item.user }}"
+  when: item.ansible_facts.getent_passwd[item.item.user] is not none
+
+- name: Make sure the sudoers template always has a list to loop over
+  ansible.builtin.set_fact:
+    homelab_sudo_accounts: "{{ homelab_sudo_accounts | default([]) }}"
+
+# The rules let group members run these files as root, so they must not be
+# writable by anyone else.
+- name: Check the k3s files the sudoers rules point at
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ homelab_k3s_bin }}"
+    - "{{ homelab_k3s_killall }}"
+  register: homelab_k3s_files
+
+- name: Refuse to allow k3s files that others can modify
+  ansible.builtin.assert:
+    that:
+      - item.stat.pw_name == 'root'
+      - not item.stat.wgrp
+      - not item.stat.woth
+    fail_msg: "{{ item.item }} must be owned by root and not writable by group or others, or the sudo rule for it would be a hole."
+    quiet: true
+  loop: "{{ homelab_k3s_files.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.stat.exists
+
+- name: Install the sudoers rules for homelab
+  ansible.builtin.template:
+    src: homelab.sudoers.j2
+    dest: /etc/sudoers.d/homelab
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s

@@ -1,0 +1,50 @@
+# Managed by Ansible (roles/homelab). Passwordless sudo for the `homelab`
+# command, for members of the group "{{ homelab_group }}" and for these exact
+# command lines only. There are no wildcards except where noted. Local edits
+# are overwritten on the next playbook run.
+#
+# Members can: start/stop the listed services, read their status, and (below)
+# stop leftover CI containers of {{ homelab_forgejo_user }}. They cannot run anything else
+# as another user, edit units, or start arbitrary containers.
+
+{# system units #}
+{% set sys = [] %}
+{% for unit, verbs in homelab_system_units.items() %}
+{% for verb in verbs %}
+{% set _ = sys.append('/usr/bin/systemctl ' ~ verb ~ ' ' ~ unit) %}
+{% endfor %}
+{% endfor %}
+{# In sudoers a command without arguments allows ANY arguments; "" means none. #}
+{% set _ = sys.append(homelab_k3s_killall ~ ' ""') %}
+{% set _ = sys.append(homelab_k3s_bin ~ ' kubectl get --raw\\=/readyz') %}
+{% if homelab_sudo_k3s_kubeconfig | bool %}
+{# Reads the cluster-admin credential: effectively root, see defaults/main.yml. #}
+{% set _ = sys.append('/usr/bin/cat ' ~ homelab_k3s_kubeconfig_src) %}
+{% endif %}
+Cmnd_Alias HOMELAB_SYSTEM = \
+    {{ sys | join(', \\\n    ') }}
+%{{ homelab_group }} ALL=(root) NOPASSWD: HOMELAB_SYSTEM
+{% for u in homelab_sudo_accounts %}
+
+{% set what = 'its systemd user instance and Podman' if u.podman else 'its systemd user instance' %}
+# {{ u.user }} (uid {{ u.uid }}): {{ what }}
+{% set env = '/usr/bin/env XDG_RUNTIME_DIR\\=/run/user/' ~ u.uid ~ ' ' %}
+{% set cmds = [] %}
+{% for unit, verbs in u.units.items() %}
+{% for verb in verbs %}
+{% if verb == 'show' %}
+{% set _ = cmds.append(env ~ 'systemctl --user show -p LoadState -p ActiveState ' ~ unit) %}
+{% else %}
+{% set _ = cmds.append(env ~ 'systemctl --user ' ~ verb ~ ' ' ~ unit) %}
+{% endif %}
+{% endfor %}
+{% endfor %}
+{% if u.podman %}
+{% set _ = cmds.append(env ~ 'podman ps --format {{.Names}}') %}
+{# The one wildcard: the names of leftover CI containers are not known in advance. #}
+{% set _ = cmds.append(env ~ 'podman stop --time 10 *') %}
+{% endif %}
+Cmnd_Alias HOMELAB_SVC_{{ loop.index }} = \
+    {{ cmds | join(', \\\n    ') }}
+%{{ homelab_group }} ALL=({{ u.user }}) NOPASSWD: HOMELAB_SVC_{{ loop.index }}
+{% endfor %}
