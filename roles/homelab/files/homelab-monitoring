@@ -1,0 +1,609 @@
+#!/usr/bin/python3 -I
+"""homelab-monitoring: get a project's Grafana dashboards (and extra data
+sources) into the monitoring stack without running Ansible.
+
+Used by `homelab add|remove monitoring`; installed by the homelab role.
+
+  homelab-monitoring stage [--name NAME] PATH...   (as you)
+      Checks the files under PATH (files or folders) and copies the Grafana
+      dashboards (.json) and data source files (.yaml/.yml) into the drop
+      folder, replacing whatever was staged under NAME before.
+  homelab-monitoring remove NAME                   (as you)
+      Takes NAME out of the drop folder.
+  homelab-monitoring apply                         (as root, via sudo)
+      Makes Grafana's provisioning match the drop folder. This is the only
+      part that runs with privileges, and the only thing sudo allows. It does
+      NOT take paths: it reads the drop folder only, never follows symlinks,
+      accepts only plain names, and re-writes every file from its parsed
+      content, so nothing a project ships can reach outside Grafana's
+      provisioning directories.
+
+The drop folder is <dropbox>/<name>/dashboards/*.json and
+<dropbox>/<name>/datasources/*.yaml. Settings come from
+/etc/homelab/monitoring.json (written by Ansible).
+"""
+
+import argparse
+import json
+import os
+import pwd
+import re
+import shutil
+import stat
+import subprocess
+import sys
+
+try:
+    import yaml
+except ImportError:  # reported only when a YAML file is actually met
+    yaml = None
+
+CONF_DEFAULT = "/etc/homelab/monitoring.json"
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
+FILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$")
+UID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
+TYPE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
+MAX_BYTES = 2 * 1024 * 1024
+MAX_FILES = 100
+MAX_PROJECTS = 50
+RESERVED = {"prometheus", "loki"}  # data source names/uids the stack itself owns
+MARK = ".homelab-managed"
+PREFIX = "homelab-"
+GENERIC_DIRS = {"monitoring", "dashboards", "dashboard", "grafana", "observability", "docs", "src"}
+SKIP_DIRS = {"node_modules", "venv", "__pycache__"}
+DS_KEYS = {
+    "name", "uid", "type", "access", "url", "user", "database", "basicAuth",
+    "basicAuthUser", "withCredentials", "isDefault", "jsonData",
+    "secureJsonData", "editable", "orgId", "version", "readOnly",
+}
+
+OK, FAIL = 0, 2
+
+
+class Problem(Exception):
+    pass
+
+
+# ------------------------------------------------------------------ validation
+
+
+def render_dashboard(raw):
+    """bytes -> text of a safe dashboard file, or raises Problem."""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise Problem("not UTF-8 text")
+    # Exported dashboards refer to their data sources by import placeholder.
+    text = re.sub(r"\$\{DS_PROMETHEUS[A-Z_]*\}", "prometheus", text)
+    text = re.sub(r"\$\{DS_LOKI[A-Z_]*\}", "loki", text)
+    try:
+        obj = json.loads(text)
+    except ValueError as exc:
+        raise Problem("not valid JSON (%s)" % exc)
+    if not isinstance(obj, dict):
+        raise Problem("not a Grafana dashboard (top level is not an object)")
+    title = obj.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise Problem("not a Grafana dashboard (no title)")
+    if not isinstance(obj.get("panels"), list) and not isinstance(obj.get("rows"), list):
+        raise Problem("not a Grafana dashboard (no panels)")
+    uid = obj.get("uid")
+    if uid is not None and not (isinstance(uid, str) and UID_RE.match(uid)):
+        raise Problem("dashboard uid must be 1-40 letters, digits, - or _")
+    obj["id"] = None  # a stale numeric id from another Grafana makes provisioning fail
+    return json.dumps(obj, indent=2, ensure_ascii=False) + "\n"
+
+
+def parse_datasources(raw):
+    """bytes -> list of validated data source dicts, or raises Problem."""
+    if yaml is None:
+        raise Problem("python3-yaml is not installed (dnf install python3-pyyaml)")
+    try:
+        doc = yaml.safe_load(raw.decode("utf-8"))
+    except (UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise Problem("not valid YAML (%s)" % str(exc).splitlines()[0])
+    if not isinstance(doc, dict) or "datasources" not in doc:
+        raise Problem("not a Grafana data source file (no 'datasources:')")
+    extra = set(doc) - {"apiVersion", "datasources"}
+    if extra:
+        raise Problem("only 'apiVersion' and 'datasources' are allowed at the top level (found: %s)"
+                      % ", ".join(sorted(map(str, extra))))
+    if doc.get("apiVersion", 1) != 1:
+        raise Problem("apiVersion must be 1")
+    items = doc["datasources"]
+    if not isinstance(items, list) or not items or len(items) > 20:
+        raise Problem("'datasources' must be a list of 1-20 entries")
+    out = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise Problem("every data source must be a mapping")
+        bad = set(item) - DS_KEYS
+        if bad:
+            raise Problem("unsupported data source key(s): %s" % ", ".join(sorted(map(str, bad))))
+        name, typ = item.get("name"), item.get("type")
+        if not isinstance(name, str) or not name.strip() or len(name) > 100:
+            raise Problem("every data source needs a name")
+        if not isinstance(typ, str) or not TYPE_RE.match(typ):
+            raise Problem("data source '%s' needs a valid type" % name)
+        uid = item.get("uid")
+        if uid is not None and not (isinstance(uid, str) and UID_RE.match(uid)):
+            raise Problem("data source '%s': uid must be 1-40 letters, digits, - or _" % name)
+        if name.lower() in RESERVED or (uid or "").lower() in RESERVED:
+            raise Problem("data source '%s' clashes with the stack's own Prometheus/Loki" % name)
+        if item.get("isDefault"):
+            raise Problem("data source '%s': isDefault is not allowed (the stack's Prometheus stays the default)" % name)
+        if item.get("orgId", 1) != 1:
+            raise Problem("data source '%s': orgId must be 1" % name)
+        for key in ("jsonData", "secureJsonData"):
+            if key in item and not isinstance(item[key], dict):
+                raise Problem("data source '%s': %s must be a mapping" % (name, key))
+        out.append(item)
+    return out
+
+
+def render_datasources(items):
+    return yaml.safe_dump({"apiVersion": 1, "datasources": items}, sort_keys=False, allow_unicode=True)
+
+
+def has_secrets(items):
+    return any(i.get("secureJsonData") or i.get("basicAuthPassword") for i in items)
+
+
+# --------------------------------------------------------------------- config
+
+
+def load_conf(path):
+    try:
+        with open(path) as fh:
+            conf = json.load(fh)
+        if not isinstance(conf.get("monitoring_user"), str) or not conf["monitoring_user"]:
+            raise ValueError("monitoring_user")
+        for key in ("config_dir", "dropbox"):
+            if not isinstance(conf.get(key), str) or not os.path.isabs(conf[key]):
+                raise ValueError(key)
+        return conf
+    except (OSError, ValueError) as exc:
+        raise SystemExit("homelab-monitoring: cannot read settings from %s (%s). "
+                         "Run: ansible-playbook site.yml --tags homelab --ask-become-pass" % (path, exc))
+
+
+# ----------------------------------------------------------------------- stage
+
+
+def sanitize(name):
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", name).lstrip("._-") or "file"
+    return name[:120]
+
+
+def default_name(paths):
+    first = os.path.abspath(paths[0])
+    d = first if os.path.isdir(first) else os.path.dirname(first)
+    while os.path.basename(d).lower() in GENERIC_DIRS and os.path.dirname(d) != d:
+        d = os.path.dirname(d)
+    name = re.sub(r"[^a-z0-9._-]", "-", os.path.basename(d).lower()).strip("._-")
+    return name or "project"
+
+
+def walk_sources(paths):
+    """Yield (relative name, absolute path) of candidate files; never follows links inside folders."""
+    for given in paths:
+        if os.path.isfile(given):
+            yield os.path.basename(given), given
+        elif os.path.isdir(given):
+            base = os.path.realpath(given)
+            for root, dirs, files in os.walk(base, followlinks=False):
+                dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS
+                                 and not os.path.islink(os.path.join(root, d)))
+                for f in sorted(files):
+                    full = os.path.join(root, f)
+                    if f.startswith(".") or os.path.islink(full):
+                        continue
+                    if f.lower().endswith((".json", ".yaml", ".yml")):
+                        yield os.path.relpath(full, base).replace(os.sep, "__"), full
+        else:
+            raise SystemExit("homelab-monitoring: %s is not a file or folder" % given)
+
+
+def read_small(path):
+    st = os.stat(path)
+    if st.st_size > MAX_BYTES:
+        raise Problem("larger than %d MiB" % (MAX_BYTES // 1048576))
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def cmd_stage(conf, args):
+    paths = args.paths
+    name = args.name or default_name(paths)
+    if not NAME_RE.match(name):
+        raise SystemExit("homelab-monitoring: name '%s' must be lowercase letters, digits, . _ - (max 63)" % name)
+    dashboards, datasources, problems, notes = {}, {}, [], []
+    for rel, full in walk_sources(paths):
+        low = rel.lower()
+        try:
+            raw = read_small(full)
+            if low.endswith(".json"):
+                try:
+                    render_dashboard(raw)  # validation only; the root side renders again
+                except Problem as exc:
+                    if str(exc).startswith("not a Grafana dashboard"):
+                        notes.append("skipped     %s: %s" % (rel, exc))
+                        continue
+                    raise
+                dashboards[sanitize(rel)] = raw
+                print("dashboard   %s" % rel)
+            else:
+                try:
+                    items = parse_datasources(raw)
+                except Problem as exc:
+                    if str(exc).startswith("not a Grafana data source file"):
+                        notes.append("skipped     %s: %s" % (rel, exc))
+                        continue
+                    raise
+                stem = sanitize(os.path.splitext(rel)[0]) + ".yaml"
+                datasources[stem] = raw
+                print("datasource  %s (%s)" % (rel, ", ".join(i["name"] for i in items)))
+                if has_secrets(items):
+                    notes.append("WARNING     %s contains credentials: the copy Grafana reads is readable by every "
+                                 "user on this machine" % rel)
+        except Problem as exc:
+            problems.append("ERROR       %s: %s" % (rel, exc))
+    for line in notes:
+        print(line)
+    if problems:
+        print("\n".join(problems), file=sys.stderr)
+        print("homelab-monitoring: nothing was staged; fix the files above and run it again.", file=sys.stderr)
+        return FAIL
+    if not dashboards and not datasources:
+        print("homelab-monitoring: no Grafana dashboards or data source files found in: %s" % " ".join(paths),
+              file=sys.stderr)
+        return FAIL
+    if len(dashboards) + len(datasources) > MAX_FILES:
+        print("homelab-monitoring: more than %d files; refusing" % MAX_FILES, file=sys.stderr)
+        return FAIL
+
+    drop = conf["dropbox"]
+    # A dashboard uid must be unique in Grafana; catch a clash with another added project now.
+    mine = {}
+    for fname, raw in dashboards.items():
+        try:
+            uid = json.loads(raw.decode("utf-8")).get("uid")
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if uid:
+            mine[uid] = fname
+    if mine and os.path.isdir(drop):
+        for other in sorted(os.listdir(drop)):
+            odash = os.path.join(drop, other, "dashboards")
+            if other == name or not NAME_RE.match(other) or not os.path.isdir(odash):
+                continue
+            for ofile in sorted(os.listdir(odash)):
+                try:
+                    # plain files only: a FIFO or symlink planted in the drop folder must not hang or mislead us
+                    fd = os.open(os.path.join(odash, ofile), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    try:
+                        if not stat.S_ISREG(os.fstat(fd).st_mode):
+                            continue
+                        ouid = json.loads(os.read(fd, MAX_BYTES).decode("utf-8")).get("uid")
+                    finally:
+                        os.close(fd)
+                except (OSError, ValueError, UnicodeDecodeError, AttributeError):
+                    continue
+                if ouid in mine:
+                    problems.append("ERROR       dashboard uid '%s' (%s) is already used by '%s' (%s): "
+                                    "change the uid in one of them" % (ouid, mine[ouid], other, ofile))
+        if problems:
+            print("\n".join(problems), file=sys.stderr)
+            print("homelab-monitoring: nothing was staged.", file=sys.stderr)
+            return FAIL
+    if not os.path.isdir(drop):
+        print("homelab-monitoring: %s does not exist. Run: ansible-playbook site.yml --tags homelab "
+              "--ask-become-pass" % drop, file=sys.stderr)
+        return FAIL
+    if not os.access(drop, os.W_OK):
+        print("homelab-monitoring: you cannot write to %s. Are you in the homelab group? "
+              "(log out and in after being added)" % drop, file=sys.stderr)
+        return FAIL
+    final = os.path.join(drop, name)
+    tmp = os.path.join(drop, ".%s.new-%d" % (name, os.getpid()))
+    old = os.path.join(drop, ".%s.old-%d" % (name, os.getpid()))
+    try:
+        for sub, files in (("dashboards", dashboards), ("datasources", datasources)):
+            os.makedirs(os.path.join(tmp, sub), exist_ok=True)
+            for fname, raw in files.items():
+                target = os.path.join(tmp, sub, fname if sub == "datasources" else
+                                      (fname if fname.lower().endswith(".json") else fname + ".json"))
+                with open(target, "wb") as fh:
+                    fh.write(raw)
+                os.chmod(target, 0o664)
+            os.chmod(os.path.join(tmp, sub), 0o2775)
+        os.chmod(tmp, 0o2775)
+        if os.path.lexists(final):
+            os.rename(final, old)
+        os.rename(tmp, final)
+    finally:
+        for leftover in (tmp, old):
+            if os.path.lexists(leftover):
+                shutil.rmtree(leftover, ignore_errors=True)
+    print("staged as '%s': %d dashboard(s), %d data source file(s)" % (name, len(dashboards), len(datasources)))
+    return OK
+
+
+def cmd_remove(conf, args):
+    if not NAME_RE.match(args.name):
+        raise SystemExit("homelab-monitoring: bad name '%s'" % args.name)
+    final = os.path.join(conf["dropbox"], args.name)
+    if os.path.islink(final) or not os.path.isdir(final):
+        print("homelab-monitoring: '%s' has not been added" % args.name, file=sys.stderr)
+        return FAIL
+    shutil.rmtree(final)
+    print("removed '%s' from the drop folder" % args.name)
+    return OK
+
+
+# ----------------------------------------------------------------------- apply
+
+_O_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _kind(dirfd, name):
+    try:
+        return stat.S_IFMT(os.stat(name, dir_fd=dirfd, follow_symlinks=False).st_mode)
+    except OSError:
+        return None
+
+
+def _read_regular(dirfd, name):
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, dir_fd=dirfd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise Problem("not a regular file")
+        if st.st_size > MAX_BYTES:
+            raise Problem("larger than %d MiB" % (MAX_BYTES // 1048576))
+        chunks, left = [], st.st_size + 1
+        while left > 0:
+            chunk = os.read(fd, min(left, 1 << 20))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            left -= len(chunk)
+        data = b"".join(chunks)
+        if len(data) > MAX_BYTES:
+            raise Problem("larger than %d MiB" % (MAX_BYTES // 1048576))
+        return data
+    finally:
+        os.close(fd)
+
+
+def read_dropbox(drop, errors):
+    """-> {project: {"dashboards": {file: bytes}, "datasources": {file: bytes}}}, reading only plain files."""
+    try:
+        rootfd = os.open(drop, _O_DIR)
+    except OSError as exc:
+        raise SystemExit("homelab-monitoring: cannot open drop folder %s (%s)" % (drop, exc.strerror))
+    st = os.fstat(rootfd)
+    if st.st_uid != 0 or st.st_mode & stat.S_IWOTH:
+        raise SystemExit("homelab-monitoring: %s must be owned by root and not world-writable" % drop)
+    projects = {}
+    for name in sorted(os.listdir(rootfd)):
+        if not NAME_RE.match(name):
+            continue  # temp dirs (.x.new-1234) and anything with an odd name
+        if len(projects) >= MAX_PROJECTS:
+            errors.append("more than %d projects; ignoring '%s' and later ones" % (MAX_PROJECTS, name))
+            break
+        if _kind(rootfd, name) != stat.S_IFDIR:
+            errors.append("%s: not a plain folder, ignored" % name)
+            continue
+        pfd = os.open(name, _O_DIR, dir_fd=rootfd)
+        entry = {"dashboards": {}, "datasources": {}}
+        total = 0
+        for sub, suffixes in (("dashboards", (".json",)), ("datasources", (".yaml", ".yml"))):
+            if _kind(pfd, sub) != stat.S_IFDIR:
+                continue
+            sfd = os.open(sub, _O_DIR, dir_fd=pfd)
+            for fname in sorted(os.listdir(sfd)):
+                where = "%s/%s/%s" % (name, sub, fname)
+                if not FILE_RE.match(fname) or not fname.lower().endswith(suffixes):
+                    errors.append("%s: name not allowed, ignored" % where)
+                    continue
+                total += 1
+                if total > MAX_FILES:
+                    errors.append("%s: more than %d files in a project, ignored" % (where, MAX_FILES))
+                    continue
+                if _kind(sfd, fname) != stat.S_IFREG:
+                    errors.append("%s: not a regular file, ignored" % where)
+                    continue
+                try:
+                    entry[sub][fname] = _read_regular(sfd, fname)
+                except (Problem, OSError) as exc:
+                    errors.append("%s: %s" % (where, exc))
+            os.close(sfd)
+        os.close(pfd)
+        projects[name] = entry
+    os.close(rootfd)
+    return projects
+
+
+class Writer:
+    def __init__(self, uid, gid):
+        self.uid, self.gid = uid, gid
+        self.touched = []
+        self.changed = False
+
+    def mkdir(self, path):
+        if os.path.lexists(path):
+            if os.path.islink(path) or not os.path.isdir(path):
+                raise Problem("%s is not a plain folder" % path)
+            return
+        os.mkdir(path, 0o755)
+        os.chown(path, self.uid, self.gid)
+        os.chmod(path, 0o755)
+        self.touched.append(path)
+        self.changed = True
+
+    def write(self, path, data):
+        """Atomic write; returns False if the file already had exactly this content."""
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                same = os.read(fd, MAX_BYTES + 1) == data
+            finally:
+                os.close(fd)
+            if same:
+                return False
+        except OSError:
+            pass
+        tmp = "%s.tmp-%d" % (path, os.getpid())
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        try:
+            os.write(fd, data)
+            os.fchown(fd, self.uid, self.gid)
+            os.fchmod(fd, 0o644)  # Grafana's container user reads it as "other"
+        finally:
+            os.close(fd)
+        os.rename(tmp, path)
+        self.touched.append(path)
+        self.changed = True
+        return True
+
+    def remove(self, path):
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path)
+        else:
+            os.unlink(path)
+        self.changed = True
+
+    def relabel(self):
+        """Grafana runs in a container; under SELinux it can only read container_file_t.
+        Returns an error text, or "" (also when SELinux is off)."""
+        if not self.touched or not os.path.exists("/sys/fs/selinux/enforce") or not os.path.exists("/usr/bin/chcon"):
+            return ""
+        done = subprocess.run(["/usr/bin/chcon", "-t", "container_file_t", "--"] + self.touched,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, check=False)
+        return "" if done.returncode == 0 else "could not set the SELinux label (Grafana may not see the files): " + done.stderr.strip()
+
+
+def cmd_apply(conf, args):
+    if os.geteuid() != 0:
+        raise SystemExit("homelab-monitoring apply must run as root (it is called through sudo by `homelab`)")
+    try:
+        pw = pwd.getpwnam(conf["monitoring_user"])
+    except KeyError:
+        print("homelab-monitoring: monitoring is not installed (no user '%s')" % conf["monitoring_user"], file=sys.stderr)
+        return FAIL
+    cfg = conf["config_dir"]
+    dash_root = os.path.join(cfg, "app-dashboards")
+    ds_dir = os.path.join(cfg, "grafana-provisioning", "datasources")
+    for d in (dash_root, ds_dir):
+        if os.path.islink(d) or not os.path.isdir(d):
+            print("homelab-monitoring: %s is missing: install monitoring first "
+                  "(ansible-playbook site.yml --tags monitoring)" % d, file=sys.stderr)
+            return FAIL
+
+    errors = []
+    projects = read_dropbox(conf["dropbox"], errors)
+    w = Writer(pw.pw_uid, pw.pw_gid)
+
+    # ---- render and validate everything first
+    want_dash, want_ds = {}, {}
+    seen_uid, seen_ds = {}, {}
+    for proj, entry in projects.items():
+        for fname, raw in entry["dashboards"].items():
+            where = "%s/dashboards/%s" % (proj, fname)
+            try:
+                text = render_dashboard(raw)
+                uid = json.loads(text).get("uid")
+                if uid and uid in seen_uid:
+                    raise Problem("dashboard uid '%s' is already used by %s" % (uid, seen_uid[uid]))
+                if uid:
+                    seen_uid[uid] = where
+                want_dash.setdefault(proj, {})[fname] = text.encode("utf-8")
+            except Problem as exc:
+                errors.append("%s: %s" % (where, exc))
+        for fname, raw in entry["datasources"].items():
+            where = "%s/datasources/%s" % (proj, fname)
+            try:
+                items = parse_datasources(raw)
+                for item in items:
+                    for key in (item["name"].lower(), (item.get("uid") or "").lower()):
+                        if key and key in seen_ds:
+                            raise Problem("data source name/uid '%s' is already used by %s" % (key, seen_ds[key]))
+                    seen_ds[item["name"].lower()] = where
+                    if item.get("uid"):
+                        seen_ds[item["uid"].lower()] = where
+                out_name = "%s%s-%s" % (PREFIX, proj, os.path.splitext(fname)[0] + ".yaml")
+                want_ds[out_name] = render_datasources(items).encode("utf-8")
+            except Problem as exc:
+                errors.append("%s: %s" % (where, exc))
+
+    # ---- dashboards: one managed folder per project (folder name = Grafana folder)
+    managed = set()
+    for entry in os.scandir(dash_root):
+        if entry.is_dir(follow_symlinks=False) and os.path.lexists(os.path.join(entry.path, MARK)):
+            managed.add(entry.name)
+    for proj, files in sorted(want_dash.items()):
+        pdir = os.path.join(dash_root, proj)
+        if os.path.lexists(pdir) and proj not in managed:
+            errors.append("%s: a Grafana folder of that name already exists and was not created by `homelab add` "
+                          "(Ansible's monitor_app?). Use another name: homelab add monitoring --name OTHER ..." % proj)
+            want_dash.pop(proj)
+            continue
+        try:
+            w.mkdir(pdir)
+            w.write(os.path.join(pdir, MARK), b"")
+            for fname, data in files.items():
+                w.write(os.path.join(pdir, fname), data)
+            for existing in os.listdir(pdir):
+                if existing != MARK and existing not in files and ".tmp-" not in existing:
+                    w.remove(os.path.join(pdir, existing))
+        except (Problem, OSError) as exc:
+            errors.append("%s: %s" % (proj, exc))
+    for proj in sorted(managed - set(want_dash)):
+        w.remove(os.path.join(dash_root, proj))
+
+    # ---- data sources: homelab-<project>-<file>.yaml in Grafana's provisioning folder
+    ds_changed = False
+    for fname, data in sorted(want_ds.items()):
+        try:
+            if w.write(os.path.join(ds_dir, fname), data):
+                ds_changed = True
+        except OSError as exc:
+            errors.append("%s: %s" % (fname, exc))
+    for existing in os.listdir(ds_dir):
+        full = os.path.join(ds_dir, existing)
+        if existing.startswith(PREFIX) and existing not in want_ds and ".tmp-" not in existing \
+                and not os.path.islink(full) and os.path.isfile(full):
+            w.remove(full)
+            ds_changed = True
+    label_error = w.relabel()
+    if label_error:
+        errors.append(label_error)
+
+    n_dash = sum(len(f) for f in want_dash.values())
+    print("applied: %d dashboard(s) in %d folder(s), %d data source file(s)" % (n_dash, len(want_dash), len(want_ds)))
+    print("changes: %s" % ("yes" if w.changed else "none"))
+    if ds_changed:
+        print("RESTART_GRAFANA")  # data sources are only read when Grafana starts
+    for line in errors:
+        print("problem: %s" % line, file=sys.stderr)
+    return 3 if errors else OK
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="homelab-monitoring", description=__doc__.split("\n\n")[0])
+    ap.add_argument("--config", default=CONF_DEFAULT, help=argparse.SUPPRESS)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("stage")
+    s.add_argument("--name")
+    s.add_argument("paths", nargs="+")
+    r = sub.add_parser("remove")
+    r.add_argument("name")
+    sub.add_parser("apply")
+    args = ap.parse_args(argv)
+    conf = load_conf(args.config)
+    return {"stage": cmd_stage, "remove": cmd_remove, "apply": cmd_apply}[args.cmd](conf, args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

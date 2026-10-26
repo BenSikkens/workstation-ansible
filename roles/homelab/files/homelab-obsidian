@@ -1,0 +1,174 @@
+#!/usr/bin/python3 -I
+"""homelab-obsidian: register a folder of Markdown files (a project's docs) as
+an Obsidian vault, or unregister it again. Used by `homelab add|remove
+documentation`; installed by the homelab role. Runs as you, no sudo.
+
+  homelab-obsidian add PATH      register PATH as a vault
+  homelab-obsidian remove PATH   forget the vault (the files are not touched)
+
+Obsidian (the Flatpak md.obsidian.Obsidian) keeps its list of vaults in
+~/.var/app/md.obsidian.Obsidian/config/obsidian/obsidian.json. The folder is
+used where it is, so edits go straight into the project. Obsidian adds a
+.obsidian/ settings folder inside it the first time it opens the vault
+(add `.obsidian/` to the project's .gitignore if you do not want that tracked).
+
+The file is only changed while Obsidian is closed, because Obsidian writes it
+itself. One backup copy (obsidian.json.homelab-backup) is kept next to it.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+APP_ID = "md.obsidian.Obsidian"
+CONFIG_DEFAULT = os.path.expanduser("~/.var/app/%s/config/obsidian/obsidian.json" % APP_ID)
+SKIP_DIRS = {"node_modules", "venv", "__pycache__"}
+# what the Flatpak is allowed to see (its finish-args: --filesystem=home, /mnt, /media, /run/media)
+SANDBOX_OK = (os.path.expanduser("~") + os.sep, "/mnt/", "/media/", "/run/media/")
+
+
+def flatpak(*args):
+    try:
+        return subprocess.run([os.environ.get("HOMELAB_FLATPAK", "flatpak")] + list(args), capture_output=True,
+                              text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def installed():
+    done = flatpak("info", APP_ID)
+    return done is not None and done.returncode == 0
+
+
+def running():
+    done = flatpak("ps", "--columns=application")
+    return done is not None and APP_ID in done.stdout.split()
+
+
+def has_markdown(path):
+    for root, dirs, files in os.walk(path, followlinks=False):
+        dirs[:] = [d for d in dirs if not d.startswith(".") and d not in SKIP_DIRS]
+        if any(f.lower().endswith(".md") for f in files):
+            return True
+    return False
+
+
+def load(config):
+    if not os.path.exists(config):
+        return {}
+    try:
+        with open(config) as fh:
+            data = json.load(fh)
+    except ValueError as exc:
+        raise SystemExit("homelab-obsidian: %s is not valid JSON (%s); not touching it" % (config, exc))
+    if not isinstance(data, dict) or not isinstance(data.get("vaults", {}), dict):
+        raise SystemExit("homelab-obsidian: %s has an unexpected layout; not touching it" % config)
+    return data
+
+
+def save(config, data):
+    os.makedirs(os.path.dirname(config), exist_ok=True)
+    if os.path.exists(config):
+        shutil.copy2(config, config + ".homelab-backup")
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(config), prefix=".obsidian.json.")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(data, fh, separators=(",", ":"))
+        if os.path.exists(config):
+            shutil.copymode(config, tmp)
+        os.replace(tmp, config)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def gate(args):
+    """Common checks; returns an exit code when the command must stop, else None."""
+    if not installed():
+        print("homelab-obsidian: Obsidian is not installed on this machine "
+              "(ansible-playbook site.yml --tags obsidian --ask-become-pass)", file=sys.stderr)
+        return 2
+    if running() and not args.force:
+        print("homelab-obsidian: Obsidian is running. Close it first (it rewrites its vault list when it "
+              "closes and would undo this), then run the command again.", file=sys.stderr)
+        return 2
+    return None
+
+
+def cmd_add(args):
+    path = os.path.realpath(os.path.expanduser(args.path))
+    if not os.path.isdir(path):
+        print("homelab-obsidian: %s is not a folder" % args.path, file=sys.stderr)
+        return 2
+    if not has_markdown(path):
+        print("homelab-obsidian: no .md files found under %s" % path, file=sys.stderr)
+        return 2
+    stop = gate(args)
+    if stop is not None:
+        return stop
+    data = load(args.config)
+    vaults = data.setdefault("vaults", {})
+    for vid, info in vaults.items():
+        other = os.path.realpath(str(info.get("path", "")))
+        if other == path:
+            print("'%s' is already an Obsidian vault (nothing to do)" % path)
+            return 0
+        if path.startswith(other + os.sep):
+            print("homelab-obsidian: %s is inside the existing vault %s; nested vaults are confusing, "
+                  "so not adding it" % (path, other), file=sys.stderr)
+            return 2
+        if other.startswith(path + os.sep):
+            print("homelab-obsidian: the existing vault %s is inside %s; remove it first "
+                  "(homelab remove documentation %s)" % (other, path, other), file=sys.stderr)
+            return 2
+    if not path.startswith(SANDBOX_OK):
+        print("Warning: the Obsidian Flatpak can only see your home folder, /mnt, /media and /run/media; "
+              "%s is outside those, so Obsidian will not be able to open it." % path, file=sys.stderr)
+    vid = hashlib.sha256(path.encode()).hexdigest()[:16]
+    vaults[vid] = {"path": path, "ts": int(time.time() * 1000)}
+    save(args.config, data)
+    print("Added '%s' as an Obsidian vault named '%s'." % (path, os.path.basename(path)))
+    print("Start Obsidian and choose it under 'Manage vaults' (the vault switcher, bottom left).")
+    if os.path.isdir(os.path.join(path, ".git")) or os.path.exists(os.path.join(os.path.dirname(path), ".git")):
+        print("Hint: add '.obsidian/' to the project's .gitignore; Obsidian keeps its settings there.")
+    return 0
+
+
+def cmd_remove(args):
+    path = os.path.realpath(os.path.expanduser(args.path))
+    stop = gate(args)
+    if stop is not None:
+        return stop
+    data = load(args.config)
+    vaults = data.get("vaults", {})
+    gone = [v for v, info in vaults.items() if os.path.realpath(str(info.get("path", ""))) == path]
+    if not gone:
+        print("'%s' is not a registered Obsidian vault" % path, file=sys.stderr)
+        return 2
+    for v in gone:
+        del vaults[v]
+    save(args.config, data)
+    print("Removed the vault '%s' from Obsidian (the files were not touched)." % path)
+    return 0
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="homelab-obsidian", description=__doc__.split("\n\n")[0])
+    ap.add_argument("--config", default=CONFIG_DEFAULT, help=argparse.SUPPRESS)
+    ap.add_argument("--force", action="store_true", help="change the file even though Obsidian is running")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for name in ("add", "remove"):
+        sub.add_parser(name).add_argument("path")
+    args = ap.parse_args(argv)
+    return {"add": cmd_add, "remove": cmd_remove}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

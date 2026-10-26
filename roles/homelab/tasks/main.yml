@@ -23,6 +23,51 @@
     group: "{{ desktop_user }}"
     mode: "0644"
 
+# ------------------------------------------- homelab add monitoring|documentation
+# homelab-monitoring: user part stages a project's dashboards into a drop folder
+# (group-writable); root part, the only thing sudo allows, applies it to Grafana.
+# homelab-obsidian: registers a docs folder as an Obsidian vault (as you).
+- name: Install PyYAML (the tools read data source files with it)
+  ansible.builtin.dnf:
+    name: python3-pyyaml
+    state: present
+
+- name: Create the directory for the homelab tools
+  ansible.builtin.file:
+    path: "{{ homelab_libexec_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install the homelab tools
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ homelab_libexec_dir }}/{{ item }}"
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - homelab-monitoring
+    - homelab-obsidian
+
+- name: Create /etc/homelab
+  ansible.builtin.file:
+    path: /etc/homelab
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# Read by the root part of homelab-monitoring; root-owned, so trusted.
+- name: Write the settings of homelab-monitoring
+  ansible.builtin.copy:
+    content: "{{ {'monitoring_user': homelab_monitoring_user, 'config_dir': homelab_monitoring_config_dir, 'dropbox': homelab_dropbox_dir} | to_nice_json }}\n"
+    dest: /etc/homelab/monitoring.json
+    owner: root
+    group: root
+    mode: "0644"
+
 # ------------------------------------------------- group and passwordless sudo
 # Members of {{ homelab_group }} may run the exact commands `homelab` needs without a
 # password (see templates/homelab.sudoers.j2). Everything else still asks.
@@ -30,6 +75,17 @@
   ansible.builtin.group:
     name: "{{ homelab_group }}"
     state: present
+
+- name: Create the drop folder for `homelab add monitoring`
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ homelab_dropbox_dir | dirname }}", group: root, mode: "0755"}
+    - {path: "{{ homelab_dropbox_dir }}", group: "{{ homelab_group }}", mode: "2775"}
 
 - name: Add the homelab users to that group
   ansible.builtin.user:

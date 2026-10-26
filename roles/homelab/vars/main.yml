@@ -26,4 +26,4 @@ homelab_user_units:
     units:
       prometheus.service: [show, start, stop]
       loki.service: [show, start, stop]
-      grafana.service: [show, start, stop]
+      grafana.service: [show, start, stop, restart]  # restart: after `homelab add monitoring` brings data sources

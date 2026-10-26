@@ -1,6 +1,6 @@
 ---
 # monitor_app: registers ONE application with the monitoring stack. It is not
-# listed in site.yml; other roles call it (see MONITORING-APPS.md):
+# listed in site.yml; other roles call it (see docs/features/monitoring-apps.md):
 #
 #   - name: Work out where this role's dashboard file is
 #     ansible.builtin.set_fact:
@@ -15,7 +15,7 @@
 #
 # The set_fact step matters: variables passed to include_role are evaluated
 # lazily, inside monitor_app, where {{ role_path }} would point at monitor_app
-# instead of your role. See MONITORING-APPS.md.
+# instead of your role. See docs/features/monitoring-apps.md.
 #
 # It only writes files: a scrape-target file for Alloy and dashboard JSON for
 # Grafana, both picked up automatically within about 30 seconds. If the

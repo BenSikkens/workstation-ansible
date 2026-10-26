@@ -3,9 +3,11 @@
 # command lines only. There are no wildcards except where noted. Local edits
 # are overwritten on the next playbook run.
 #
-# Members can: start/stop the listed services, read their status, and (below)
-# stop leftover CI containers of {{ homelab_forgejo_user }}. They cannot run anything else
-# as another user, edit units, or start arbitrary containers.
+# Members can: start/stop the listed services, read their status, stop
+# leftover CI containers of {{ homelab_forgejo_user }}, and have the drop folder of `homelab add
+# monitoring` applied to Grafana (homelab-monitoring apply: takes no path,
+# reads only that folder). They cannot run anything else as another user,
+# edit units, or start arbitrary containers.
 
 {# system units #}
 {% set sys = [] %}
@@ -14,6 +16,8 @@
 {% set _ = sys.append('/usr/bin/systemctl ' ~ verb ~ ' ' ~ unit) %}
 {% endfor %}
 {% endfor %}
+{# Applies the drop folder to Grafana. Takes no path: it reads only the drop folder. #}
+{% set _ = sys.append(homelab_libexec_dir ~ '/homelab-monitoring apply') %}
 {# In sudoers a command without arguments allows ANY arguments; "" means none. #}
 {% set _ = sys.append(homelab_k3s_killall ~ ' ""') %}
 {% set _ = sys.append(homelab_k3s_bin ~ ' kubectl get --raw\\=/readyz') %}

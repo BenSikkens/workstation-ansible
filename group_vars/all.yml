@@ -29,14 +29,14 @@ forgejo_backup_enabled: true
 
 # --- Monitoring -----------------------------------------------------------
 # Grafana + Prometheus + Loki under a dedicated 'monitoring' user, plus the
-# agents that feed them (see roles/monitoring and the README). Everything
+# agents that feed them (see docs/roles/monitoring.md). Everything
 # listens on 127.0.0.1 only. Set to false to skip installing it; `homelab`
 # then manages only the Forgejo stack.
 monitoring_enabled: true
 
 # --- homelab command ------------------------------------------------------
 # Members of this group may run `homelab` without a sudo password (exact
-# commands only, see roles/homelab and the README). Add everyone who should be
+# commands only, see docs/roles/homelab.md). Add everyone who should be
 # able to; they must log out and in again once.
 # homelab_users:
 #   - "{{ desktop_user }}"

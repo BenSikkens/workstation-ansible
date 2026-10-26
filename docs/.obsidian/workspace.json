@@ -1,0 +1,237 @@
+{
+  "main": {
+    "id": "f13b52704c4f6767",
+    "type": "split",
+    "children": [
+      {
+        "id": "93f1b799695826ac",
+        "type": "split",
+        "children": [
+          {
+            "id": "f7af2f0b9eed79ce",
+            "type": "tabs",
+            "dimension": 62.57102272727273,
+            "children": [
+              {
+                "id": "85d30064055040d1",
+                "type": "leaf",
+                "state": {
+                  "type": "markdown",
+                  "state": {
+                    "file": "README.md",
+                    "mode": "source",
+                    "source": false
+                  },
+                  "icon": "lucide-file",
+                  "title": "README"
+                }
+              }
+            ]
+          },
+          {
+            "id": "671673ca3658f7a2",
+            "type": "tabs",
+            "dimension": 37.42897727272727,
+            "children": [
+              {
+                "id": "5261b488753c1e4a",
+                "type": "leaf",
+                "state": {
+                  "type": "graph",
+                  "state": {},
+                  "icon": "lucide-git-fork",
+                  "title": "Graph view"
+                }
+              }
+            ]
+          }
+        ],
+        "direction": "horizontal"
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "ee22e62fe4ec30c8",
+    "type": "split",
+    "children": [
+      {
+        "id": "1e61bb0b52f0b882",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "069f53cf9c1faf95",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "ce9b2b299f904fb4",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "bc8eca17b380b919",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "d464a06306467b17",
+    "type": "split",
+    "children": [
+      {
+        "id": "6a2c548aa829117f",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "69ee789f559d5702",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "README.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks"
+            }
+          },
+          {
+            "id": "208880b826888096",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "README.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links"
+            }
+          },
+          {
+            "id": "278ac992dbba4a52",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "892ce1ec4ccfa794",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          },
+          {
+            "id": "80141f2b76ce9cd3",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "README.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": false
+    }
+  },
+  "active": "85d30064055040d1",
+  "lastOpenFiles": [
+    "roles/homelab.md",
+    "features/homelab-sudo.md",
+    "features/homelab-add-monitoring.md",
+    "roles/monitor_app.md",
+    "roles/monitoring.md",
+    "features/homelab-add-documentation.md",
+    "features/homelab-command.md",
+    "features/cv-microfrontend.md",
+    "features/scan-report.md",
+    "features/adding-software.md",
+    "features/k3s-usage.md",
+    "features/monitoring-apps.md",
+    "features/overwrite-policy.md",
+    "features/networking.md",
+    "features/running-the-playbook.md",
+    "roles/flatpak_setup.md",
+    "roles/devpod.md",
+    "roles/bashrc_loader.md",
+    "README.md"
+  ]
+}

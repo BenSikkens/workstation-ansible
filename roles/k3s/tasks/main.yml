@@ -1,7 +1,7 @@
 ---
 # Installs k3s on the host with the official installer, pinned to k3s_version,
 # and tunes the machine so it lives next to Podman. See defaults/main.yml for
-# the settings and README.md ("k3s") for how to use it.
+# the settings and docs/features/k3s-usage.md for how to use it.
 #
 # The installer (https://get.k3s.io) is run as root. It installs the binary,
 # the k3s-selinux policy package, the systemd unit and the k3s-killall.sh /

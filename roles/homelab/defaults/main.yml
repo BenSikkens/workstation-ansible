@@ -28,3 +28,11 @@ homelab_k3s_kubeconfig_src: /etc/rancher/k3s/k3s.yaml
 # Set to false to drop it (the copy then fails with a message and you run
 # `sudo cat` yourself with a password).
 homelab_sudo_k3s_kubeconfig: true
+
+# --- `homelab add monitoring|documentation` -----------------------------------
+# Two small tools installed here (root-owned). The monitoring one has a root
+# part that sudo may run (`homelab-monitoring apply`, no arguments); it only
+# reads the drop folder below, which group members can write to.
+homelab_libexec_dir: /usr/local/libexec
+homelab_dropbox_dir: /var/lib/homelab/monitoring
+homelab_monitoring_config_dir: "{{ monitoring_config_dir | default('/home/' ~ homelab_monitoring_user ~ '/monitoring-config') }}"

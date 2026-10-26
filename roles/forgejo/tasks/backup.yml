@@ -1,7 +1,7 @@
 ---
 # Safety net for an EXISTING Forgejo install: before this role changes
 # anything, snapshot what is already there so a failed run can be rolled back
-# with `ansible-playbook forgejo-backup.yml` (see that playbook and the README).
+# with `ansible-playbook forgejo-backup.yml` (see that playbook and docs/features/forgejo-backup.md).
 #
 # What happens, in order:
 #   1. If there is no Forgejo data yet (fresh machine) nothing is backed up.

@@ -1,6 +1,6 @@
 ---
 # Example role: a container that serves Prometheus metrics, registered with the
-# monitoring stack. Copy it to roles/ to try it (see MONITORING-APPS.md).
+# monitoring stack. Copy it to roles/ to try it (see docs/features/monitoring-apps.md).
 #
 # The "application" is prom/statsd-exporter, only because it is a small image
 # that serves metrics on /metrics out of the box. Swap the image, the ports and

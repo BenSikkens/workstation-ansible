@@ -4,6 +4,11 @@
 #   homelab down    [scope]   stop it (plus any CI containers left behind)
 #   homelab status  [scope]   show what is running
 #
+#   homelab add monitoring [--name NAME] PATH...   put a project's Grafana dashboards
+#                             (and data source files) into the monitoring stack
+#   homelab add documentation PATH   register a folder of Markdown files as an Obsidian vault
+#   homelab remove monitoring NAME | remove documentation PATH   undo the above
+#
 # scope: forgejo      Forgejo and its Actions runner
 #        monitoring   Grafana, Prometheus, Loki, Alloy, Pushgateway, Podman exporters
 #        k3s          the k3s Kubernetes cluster
@@ -20,6 +25,8 @@
 # homelab role installs (/etc/sudoers.d/homelab, group "{{ homelab_group }}") allow
 # exactly those command lines and nothing else. Add a privileged call here and
 # the rules in roles/homelab/templates/homelab.sudoers.j2 must learn it too.
+# (`add monitoring` hands files to the root-side tool through a drop folder,
+# so no path ever reaches sudo.)
 # Managed by Ansible (roles/homelab/templates/homelab.sh.j2). Local edits are
 # overwritten on the next playbook run.
 
@@ -32,6 +39,8 @@ HOMELAB_K3S_KUBECONFIG="{{ homelab_k3s_kubeconfig }}"
 HOMELAB_K3S_BIN="{{ homelab_k3s_bin }}"
 HOMELAB_K3S_KUBECONFIG_SRC="{{ homelab_k3s_kubeconfig_src }}"
 HOMELAB_K3S_KILLALL="{{ homelab_k3s_killall }}"
+HOMELAB_MONITORING_TOOL="{{ homelab_libexec_dir }}/homelab-monitoring"
+HOMELAB_OBSIDIAN_TOOL="{{ homelab_libexec_dir }}/homelab-obsidian"
 {% raw %}
 
 # Groups and their units. A unit is "<owner>:<name>": owner is a user (that
@@ -361,7 +370,85 @@ _homelab_down() {
   return "$rc"
 }
 
+# --------------------------------------------------------------- add / remove
+
+# Apply the drop folder to Grafana (the only privileged step), then restart
+# Grafana if data sources changed: it reads those only when it starts.
+_homelab_monitoring_apply() {
+  local out rc line restart=0
+  out=$(sudo "$HOMELAB_MONITORING_TOOL" apply)
+  rc=$?
+  while IFS= read -r line; do
+    case "$line" in
+      "") ;;
+      RESTART_GRAFANA) restart=1 ;;
+      *) echo "$line" ;;
+    esac
+  done <<<"$out"
+  if [ "$restart" -eq 1 ]; then
+    if [ "${_HL_ACTIVE[$HOMELAB_MONITORING_USER:grafana.service]:-inactive}" = active ]; then
+      echo "Restarting Grafana to load the data sources..."
+      _homelab_units_do restart "$HOMELAB_MONITORING_USER:grafana.service" || rc=1
+    else
+      echo "Data sources are read when Grafana starts (homelab up monitoring)."
+    fi
+  fi
+  [ "$rc" -eq 0 ] && echo "Grafana picks up dashboards within about 30 seconds: $HOMELAB_GRAFANA_URL"
+  [ "$rc" -eq 0 ] || return 1
+}
+
+_homelab_monitoring_ready() {
+  _homelab_probe_all
+  if ! _homelab_group_installed monitoring; then
+    echo "homelab: monitoring is not installed on this machine" >&2
+    return 2
+  fi
+  if [ ! -x "$HOMELAB_MONITORING_TOOL" ]; then
+    echo "homelab: $HOMELAB_MONITORING_TOOL is missing; run: ansible-playbook site.yml --tags homelab --ask-become-pass" >&2
+    return 2
+  fi
+}
+
+_homelab_manage() {
+  local verb=$1 kind=${2:-}
+  shift 2 2>/dev/null || shift $#
+  case "$verb $kind" in
+    "add monitoring")
+      [ "$#" -gt 0 ] || { echo "Usage: homelab add monitoring [--name NAME] PATH..." >&2; return 2; }
+      _homelab_monitoring_ready || return $?
+      "$HOMELAB_MONITORING_TOOL" stage "$@" || return 1
+      _homelab_monitoring_apply
+      ;;
+    "remove monitoring")
+      [ "$#" -eq 1 ] || { echo "Usage: homelab remove monitoring NAME" >&2; return 2; }
+      _homelab_monitoring_ready || return $?
+      "$HOMELAB_MONITORING_TOOL" remove "$1" || return 1
+      _homelab_monitoring_apply
+      ;;
+    "add documentation" | "remove documentation")
+      [ "$#" -eq 1 ] || { echo "Usage: homelab $verb documentation PATH" >&2; return 2; }
+      if [ ! -x "$HOMELAB_OBSIDIAN_TOOL" ]; then
+        echo "homelab: $HOMELAB_OBSIDIAN_TOOL is missing; run: ansible-playbook site.yml --tags homelab --ask-become-pass" >&2
+        return 2
+      fi
+      "$HOMELAB_OBSIDIAN_TOOL" "$verb" "$1"
+      ;;
+    *)
+      echo "Usage: homelab add monitoring [--name NAME] PATH..." >&2
+      echo "       homelab add documentation PATH" >&2
+      echo "       homelab remove monitoring NAME | homelab remove documentation PATH" >&2
+      return 2
+      ;;
+  esac
+}
+
 homelab() {
+  case "${1:-}" in
+    add | remove)
+      _homelab_manage "$@"
+      return $?
+      ;;
+  esac
   local scope=${2:-all}
   case "$scope" in
     all | forgejo | monitoring | k3s) ;;
@@ -376,17 +463,31 @@ homelab() {
     status) _homelab_status "$scope" ;;
     *)
       echo "Usage: homelab {up|down|status} [forgejo|monitoring|k3s|all]" >&2
+      echo "       homelab {add|remove} {monitoring|documentation} ...   (see: homelab add)" >&2
       return 2
       ;;
   esac
 }
 
 _homelab_complete() {
-  local cur=${COMP_WORDS[COMP_CWORD]}
+  local cur=${COMP_WORDS[COMP_CWORD]} verb=${COMP_WORDS[1]:-}
   case "$COMP_CWORD" in
-    1) mapfile -t COMPREPLY < <(compgen -W "up down status" -- "$cur") ;;
-    2) mapfile -t COMPREPLY < <(compgen -W "all forgejo monitoring k3s" -- "$cur") ;;
-    *) COMPREPLY=() ;;
+    1) mapfile -t COMPREPLY < <(compgen -W "up down status add remove" -- "$cur") ;;
+    2)
+      case "$verb" in
+        add | remove) mapfile -t COMPREPLY < <(compgen -W "monitoring documentation" -- "$cur") ;;
+        *) mapfile -t COMPREPLY < <(compgen -W "all forgejo monitoring k3s" -- "$cur") ;;
+      esac
+      ;;
+    *)
+      case "$verb" in
+        add)
+          compopt -o filenames 2>/dev/null
+          mapfile -t COMPREPLY < <(compgen -f -- "$cur")
+          ;;
+        *) COMPREPLY=() ;;
+      esac
+      ;;
   esac
 }
 complete -F _homelab_complete homelab
