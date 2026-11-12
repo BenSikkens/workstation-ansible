@@ -24,7 +24,8 @@ writable file behind a sudo rule would be a hole); it fails otherwise.
 
 ## Features
 
-- [the `homelab` command](../features/homelab-command.md): `up`, `down`, `status`
+- [the `homelab` command](../features/homelab-command.md): `up`, `down`, `status` (scopes `identity`, `forgejo`, `monitoring`, `k3s`)
+- [the web dashboard](homelab_gui.md) (separate role, `homelab gui`)
 - [group and sudo rules](../features/homelab-sudo.md)
 - [`homelab add monitoring`](../features/homelab-add-monitoring.md)
 - [`homelab add documentation`](../features/homelab-add-documentation.md)
@@ -36,8 +37,8 @@ writable file behind a sudo rule would be a hole); it fails otherwise.
 | `homelab_group` | `homelab` | group allowed to use the commands without a password |
 | `homelab_users` | `[desktop_user]` | members |
 | `homelab_sudo_k3s_kubeconfig` | `true` | passwordless read of the k3s kubeconfig (effectively root) |
-| `homelab_forgejo_user`, `homelab_monitoring_user` | follow the roles | which accounts the rules cover |
-| `homelab_forgejo_http_port`, `homelab_grafana_port` | follow the roles | ports in the printed URLs |
+| `homelab_forgejo_user`, `homelab_monitoring_user`, `homelab_identity_user` | follow the roles | which accounts the rules cover |
+| `homelab_forgejo_http_port`, `homelab_grafana_port`, `homelab_lldap_port`, `homelab_auth_url` | follow the roles | ports in the printed URLs |
 | `homelab_k3s_bin`, `homelab_k3s_killall`, `homelab_k3s_kubeconfig_src` | `/usr/local/bin/k3s`, `/usr/local/bin/k3s-killall.sh`, `/etc/rancher/k3s/k3s.yaml` | |
 | `homelab_k3s_kubeconfig` | `~/.kube/k3s.yaml` | your copy |
 | `homelab_libexec_dir` | `/usr/local/libexec` | |
@@ -49,5 +50,5 @@ for each) that drives both the command and the sudo rules; it is not meant to be
 overridden. What is installed is **not** configured here: the command detects
 it at run time.
 
-Re-run `--tags homelab` after installing Forgejo or monitoring, so their users
+Re-run `--tags homelab` after installing Forgejo, monitoring or the identity stack, so their users
 get rules.

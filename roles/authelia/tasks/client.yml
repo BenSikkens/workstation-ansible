@@ -1,0 +1,82 @@
+---
+# One confidential OIDC client: a random secret and its PBKDF2 digest, made
+# once by Authelia's own tool and kept on disk (0600). The secret never appears
+# on a command line: `--random` makes the tool print it, and we capture that.
+# Called with authelia_client (one entry of authelia_oidc_clients).
+
+- name: Check the client id {{ authelia_client.id }}
+  ansible.builtin.assert:
+    that:
+      - authelia_client.id is match('^[A-Za-z0-9._~-]+$')
+      - authelia_client.redirect_uris | default([]) | length > 0
+    fail_msg: "OIDC client '{{ authelia_client.id }}': the id may only contain letters, digits and . _ ~ - ; redirect_uris is required."
+    quiet: true
+
+- name: Look for the secret of {{ authelia_client.id }}
+  ansible.builtin.stat:
+    path: "{{ identity_secrets_dir }}/oidc-client-{{ authelia_client.id }}.digest"
+  register: authelia_client_digest_stat
+
+- name: Make a secret and its digest (first time only)
+  when: not authelia_client_digest_stat.stat.exists
+  block:
+    - name: Generate a secret and its digest for {{ authelia_client.id }}
+      ansible.builtin.command:
+        argv:
+          - podman
+          - run
+          - --rm
+          - "{{ authelia_image }}"
+          - authelia
+          - crypto
+          - hash
+          - generate
+          - pbkdf2
+          - --random
+          - --random.length
+          - "48"
+          - --random.charset
+          - alphanumeric
+      args:
+        chdir: "/home/{{ identity_user }}"
+      become: true
+      become_user: "{{ identity_user }}"
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ identity_uid }}"
+      register: authelia_client_hash
+      changed_when: true
+      no_log: true
+
+    - name: Check that the tool printed a secret and a digest
+      ansible.builtin.assert:
+        that:
+          - authelia_client_hash.stdout is regex('Random Password: \S+')
+          - authelia_client_hash.stdout is regex('Digest: \$pbkdf2\S+')
+        fail_msg: "Could not read the output of `authelia crypto hash generate` for {{ authelia_client.id }}; the output format may have changed."
+        quiet: true
+      no_log: true
+
+    - name: Keep the secret and the digest (0600)
+      ansible.builtin.copy:
+        content: "{{ item.value }}\n"
+        dest: "{{ identity_secrets_dir }}/oidc-client-{{ authelia_client.id }}.{{ item.key }}"
+        owner: "{{ identity_user }}"
+        group: "{{ identity_user }}"
+        mode: "0600"
+      loop:
+        - {key: secret, value: "{{ authelia_client_hash.stdout | regex_search('Random Password: (\\S+)', '\\1') | first }}"}
+        - {key: digest, value: "{{ authelia_client_hash.stdout | regex_search('Digest: (\\S+)', '\\1') | first }}"}
+      loop_control:
+        label: "{{ item.key }}"
+      no_log: true
+
+- name: Read the digest of {{ authelia_client.id }}
+  ansible.builtin.slurp:
+    src: "{{ identity_secrets_dir }}/oidc-client-{{ authelia_client.id }}.digest"
+  register: authelia_client_digest
+  no_log: true
+
+- name: Remember the digest
+  ansible.builtin.set_fact:
+    authelia_client_digests: "{{ authelia_client_digests | default({}) | combine({authelia_client.id: authelia_client_digest.content | b64decode | trim}) }}"
+  no_log: true

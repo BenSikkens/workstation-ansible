@@ -1,0 +1,9 @@
+---
+# Postman has no Fedora RPM; installed from Flathub like obsidian and
+# podman_desktop (flatpak_setup provides the Flathub remote).
+
+- name: Install Postman (flatpak)
+  community.general.flatpak:
+    name: com.getpostman.Postman
+    state: present
+    method: system

@@ -11,19 +11,22 @@ in a Quadlet unit. The address in front of the port decides who can connect:
 
 ## What is exposed today
 
-| Service                             | Host port   | Reachable from                              | Defined in                                                                                  |
-| ----------------------------------- | ----------- | ------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Forgejo web                         | 3000        | LAN                                         | `roles/forgejo/templates/forgejo.container.j2` (`PublishPort={{ forgejo_http_port }}:3000`) |
-| Forgejo SSH                         | 2222        | LAN                                         | same file (`PublishPort={{ forgejo_ssh_port }}:22`)                                         |
-| Grafana                             | 3001        | this machine only                           | `roles/monitoring/templates/grafana.container.j2` (`PublishPort=127.0.0.1:...`)             |
-| Prometheus                          | 9094        | this machine only                           | `roles/monitoring/templates/prometheus.container.j2`                                        |
-| Loki                                | 3100        | this machine only                           | `roles/monitoring/templates/loki.container.j2`                                              |
-| Pushgateway                         | 9091        | this machine only                           | `roles/monitoring/templates/pushgateway.container.j2`                                       |
-| Podman exporters                    | 9882, 9883  | this machine only                           | `roles/monitoring/templates/prometheus-podman-exporter.service.j2`                          |
-| k3s API server                      | 6443        | **LAN** (needs a client certificate)        | k3s itself, `/etc/rancher/k3s/config.yaml`                                                  |
-| k3s kubelet                         | 10250       | **LAN** (needs authentication)              | k3s itself                                                                                  |
-| k3s Traefik / service load balancer | 80, 443     | **LAN** while k3s runs                      | k3s add-ons; `k3s_disable: [traefik, servicelb]` removes them                               |
-| k3s NodePort services               | 30000-32767 | **LAN** for any service you expose that way | Kubernetes                                                                                  |
+| Service | Host port | Reachable from | Defined in |
+|---|---|---|---|
+| Forgejo web | 3000 | LAN | `roles/forgejo/templates/forgejo.container.j2` (`PublishPort={{ forgejo_http_port }}:3000`) |
+| Forgejo SSH | 2222 | LAN | same file (`PublishPort={{ forgejo_ssh_port }}:22`) |
+| Grafana | 3001 | this machine only | `roles/monitoring/templates/grafana.container.j2` (`PublishPort=127.0.0.1:...`) |
+| Prometheus | 9094 | this machine only | `roles/monitoring/templates/prometheus.container.j2` |
+| Loki | 3100 | this machine only | `roles/monitoring/templates/loki.container.j2` |
+| Pushgateway | 9091 | this machine only | `roles/monitoring/templates/pushgateway.container.j2` |
+| Podman exporters | 9882, 9883 | this machine only | `roles/monitoring/templates/prometheus-podman-exporter.service.j2` |
+| lldap LDAPS | 6360 | published on all interfaces, **blocked from the LAN** by firewalld reject rules (pods in k3s can reach it) | `roles/ldap/templates/lldap.container.j2`, rules in `roles/ldap/tasks/main.yml` |
+| Authelia (OIDC, HTTPS) | 9443 | same as LDAPS | `roles/authelia/templates/authelia.container.j2` |
+| lldap web UI | 17170 | this machine only | `roles/ldap/templates/lldap.container.j2` |
+| k3s API server | 6443 | **LAN** (needs a client certificate) | k3s itself, `/etc/rancher/k3s/config.yaml` |
+| k3s kubelet | 10250 | **LAN** (needs authentication) | k3s itself |
+| k3s Traefik / service load balancer | 80, 443 | **LAN** while k3s runs | k3s add-ons; `k3s_disable: [traefik, servicelb]` removes them |
+| k3s NodePort services | 30000-32767 | **LAN** for any service you expose that way | Kubernetes |
 
 k3s is different from the container services above: it is not started through
 `PublishPort`, it listens on the host directly, so the table lists where it
@@ -32,6 +35,15 @@ typically allows incoming ports 1025-65535, which covers 6443, 10250 and the
 NodePort range; 80/443 additionally need the `http`/`https` services. Check
 yours with `sudo firewall-cmd --list-all`. All of it only exists while k3s is
 running (`homelab down k3s` closes everything).
+
+The identity stack is published on the host address so that pods in k3s can reach
+it through the node. Fedora Workstation's default firewall zone would also let
+the LAN in, so the `ldap` role adds reject rules for 6360 and 9443 there
+(`identity_lan_access: true` removes them). Pod and service networks are in
+firewalld's `trusted` zone by source, which takes precedence, so they are not
+affected. I have not tested this on a real machine; check with
+`sudo firewall-cmd --list-all` and from another machine on the LAN.
+[Identity for your apps](identity-oidc-for-apps.md) explains the design.
 
 The monitoring stack is local-only on purpose. Forgejo was already published
 without an address from the earlier hand-made setup and was left as it was.
@@ -106,7 +118,7 @@ To shut off only the SSH exposure, change just the 2222 line.
   precedence over the interface's zone, so the cluster keeps working. This is
   the recommended approach but I have not been able to test it on a real k3s
   node.
-- **Check what is listening.** `sudo ss -ltnp | grep -E ':(3000|2222|3001|9094|3100|9091)\b'`
+- **Check what is listening.** `sudo ss -ltnp | grep -E ':(3000|2222|3001|9094|3100|9091|9443|6360)\b'`
   shows the address each port is bound to: `127.0.0.1` is local only,
   `0.0.0.0` or `*` is every interface.
 - **Public URLs.** If you reach a service by hostname or LAN IP instead of

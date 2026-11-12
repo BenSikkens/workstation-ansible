@@ -12,7 +12,9 @@
 #   ansible-playbook site.yml --list-tags         # what can be selected
 #
 # Roles that need another one declare it themselves (podman_desktop and
-# obsidian pull in flatpak_setup; k3s and homelab pull in bashrc_loader), so
+# obsidian, dbeaver and postman pull in flatpak_setup; k3s and homelab pull in bashrc_loader; ldap
+# pulls in bashrc_loader and mkcert; authelia pulls in ldap; homelab_gui
+# pulls in homelab), so
 # --tags always works on its own. monitoring adapts: its Pushgateway is only
 # set up when Forgejo is installed (re-run --tags monitoring after adding it).
 #
@@ -35,12 +37,18 @@
     - { role: vscodium, tags: [vscodium] }
     - { role: keepassxc, tags: [keepassxc] }
     - { role: mkcert, tags: [mkcert] }
+    - { role: ldap, tags: [ldap] }
+    - { role: authelia, tags: [authelia] }
     - { role: forgejo, tags: [forgejo] }
     - role: monitoring
       tags: [monitoring]
       when: monitoring_enabled | default(false) | bool
     - { role: k3s, tags: [k3s] }
     - { role: obsidian, tags: [obsidian] }
+    - { role: dbeaver, tags: [dbeaver] }
+    - { role: postman, tags: [postman] }
     - { role: todotxt, tags: [todotxt] }
     - { role: devpod, tags: [devpod] }
+    - { role: jupyter, tags: [jupyter] }
     - { role: homelab, tags: [homelab] }
+    - { role: homelab_gui, tags: [homelab_gui] }

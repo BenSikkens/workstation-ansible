@@ -1,0 +1,36 @@
+# Managed by Ansible (roles/ldap). Local edits are overwritten on the next run.
+[Unit]
+Description=lldap (lightweight LDAP directory)
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image={{ ldap_image }}
+ContainerName=lldap
+Network=identity.network
+# The web UI stays on this machine. Plain LDAP (3890) is not published at all:
+# Authelia reaches it by name on the identity network. LDAPS is what apps use.
+PublishPort=127.0.0.1:{{ ldap_web_port }}:17170
+PublishPort={{ identity_bind_address }}:{{ identity_ldaps_port }}:6360
+Volume=lldap-data:/data:U
+# Shared with Authelia, hence the lower-case z (shared SELinux label).
+Volume={{ identity_tls_dir }}:/certs:ro,z
+Environment=LLDAP_LDAP_BASE_DN={{ identity_base_dn }}
+Environment=LLDAP_LDAP_USER_EMAIL={{ ldap_admin_email }}
+Environment=LLDAP_HTTP_URL=http://localhost:{{ ldap_web_port }}
+Environment=LLDAP_LDAPS_OPTIONS__ENABLED=true
+Environment=LLDAP_LDAPS_OPTIONS__PORT=6360
+Environment=LLDAP_LDAPS_OPTIONS__CERT_FILE=/certs/tls.crt
+Environment=LLDAP_LDAPS_OPTIONS__KEY_FILE=/certs/tls.key
+# Generated once by the playbook. The admin password is read on first start
+# only (lldap keeps it in its database afterwards); read it with:
+#   sudo cat {{ identity_secrets_dir }}/identity_lldap_admin_password
+Secret=identity_lldap_jwt_secret,type=env,target=LLDAP_JWT_SECRET
+Secret=identity_lldap_admin_password,type=env,target=LLDAP_LDAP_USER_PASS
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,38 @@
+# Managed by Ansible (roles/authelia). Local edits are overwritten on the next run.
+[Unit]
+Description=Authelia (OpenID Connect provider)
+After=network-online.target lldap.service
+Wants=network-online.target lldap.service
+
+[Container]
+Image={{ authelia_image }}
+ContainerName=authelia
+Network=identity.network
+PublishPort={{ identity_bind_address }}:{{ identity_authelia_port }}:9091
+Volume={{ authelia_config_dir }}:/config:ro,Z
+Volume=authelia-data:/data:U
+# Shared with lldap, hence the lower-case z (shared SELinux label).
+Volume={{ identity_tls_dir }}:/certs:ro,z
+# Lets configuration.yml read the signing key with {{ '{{ secret "..." }}' }}.
+Environment=X_AUTHELIA_CONFIG_FILTERS=template
+# Secrets are Podman secrets, mounted as files under /run/secrets/.
+Secret=authelia_session_secret
+Secret=authelia_storage_key
+Secret=authelia_reset_jwt_secret
+Secret=identity_bind_password
+Environment=AUTHELIA_SESSION_SECRET_FILE=/run/secrets/authelia_session_secret
+Environment=AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE=/run/secrets/authelia_storage_key
+Environment=AUTHELIA_IDENTITY_VALIDATION_RESET_PASSWORD_JWT_SECRET_FILE=/run/secrets/authelia_reset_jwt_secret
+Environment=AUTHELIA_AUTHENTICATION_BACKEND_LDAP_PASSWORD_FILE=/run/secrets/identity_bind_password
+{% if authelia_oidc_clients | length > 0 %}
+Secret=authelia_oidc_hmac_secret
+Secret=authelia_oidc_jwks_key
+Environment=AUTHELIA_IDENTITY_PROVIDERS_OIDC_HMAC_SECRET_FILE=/run/secrets/authelia_oidc_hmac_secret
+{% endif %}
+
+[Service]
+Restart=always
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

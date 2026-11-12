@@ -27,3 +27,8 @@ homelab_user_units:
       prometheus.service: [show, start, stop]
       loki.service: [show, start, stop]
       grafana.service: [show, start, stop, restart]  # restart: after `homelab add monitoring` brings data sources
+  - user: "{{ homelab_identity_user }}"
+    podman: false
+    units:
+      lldap.service: [show, start, stop]
+      authelia.service: [show, start, stop]

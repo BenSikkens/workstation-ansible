@@ -1,0 +1,33 @@
+---
+# Identity stack, part 2: Authelia as the OpenID Connect provider for apps,
+# with the lldap directory (ldap role) as its user store. Shared settings
+# (domain, ports, user, TLS) are the identity_* variables in roles/ldap/defaults.
+
+# Pinned to a minor release; bump deliberately.
+authelia_image: "docker.io/authelia/authelia:4.39"
+authelia_log_level: info
+authelia_config_dir: "{{ identity_dir }}/authelia"
+
+# The OpenID Connect clients (your apps). Put the list in group_vars/all.yml.
+# With no clients, OIDC is left out of the configuration (Authelia refuses an
+# OIDC section without clients) and only the login portal runs.
+#
+#   authelia_oidc_clients:
+#     - id: myapp                       # letters, digits . _ ~ -
+#       name: My App                    # shown on the consent screen (optional)
+#       redirect_uris:
+#         - https://myapp.lab.internal/oauth2/callback
+#       # Optional, with their defaults:
+#       # public: false                 # true for SPAs/CLIs that cannot keep a secret
+#       # scopes: [openid, profile, email, groups]
+#       # policy: one_factor            # or two_factor (needs 2FA enrolled in Authelia)
+#       # require_pkce: true
+#
+# The secret of each confidential client is generated once and kept in
+# <identity_secrets_dir>/oidc-client-<id>.secret; read it with
+# `identity-oidc-secret <id>`. Authelia only gets its hash.
+authelia_oidc_clients: []
+
+# Authorization policy for clients that do not set one. one_factor = password
+# only. Authelia's own default is two_factor.
+authelia_oidc_default_policy: one_factor

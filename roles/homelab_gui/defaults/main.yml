@@ -1,0 +1,32 @@
+---
+# The homelab web dashboard: a small local page over the `homelab` command.
+# Runs as desktop_user in a systemd user service, on loopback only.
+
+# Port on 127.0.0.1. Taken already: 3000 Forgejo, 3001 Grafana, 3100 Loki,
+# 9090 Prometheus, 9091 Pushgateway, 9443 Authelia, 17170 lldap.
+homelab_gui_port: 8088
+
+# Start it at login (a few MB of memory). With false it is only installed;
+# `homelab gui` or the Homelab launcher starts it when you want it.
+homelab_gui_autostart: true
+
+# How many log lines the log viewer loads.
+homelab_gui_log_lines: 300
+
+homelab_gui_dir: "/home/{{ desktop_user }}/.local/lib/homelab-gui"
+homelab_gui_config_dir: "/home/{{ desktop_user }}/.config/homelab-gui"
+homelab_gui_token_file: "{{ homelab_gui_config_dir }}/token"
+
+# Links on the cards, shown only for groups that are installed. `group` is one
+# of identity, forgejo, monitoring, k3s.
+homelab_gui_links:
+  - {group: identity, name: Authelia, url: "{{ homelab_auth_url }}"}
+  - {group: identity, name: lldap, url: "http://localhost:{{ homelab_lldap_port }}"}
+  - {group: forgejo, name: Forgejo, url: "http://localhost:{{ homelab_forgejo_http_port }}"}
+  - {group: monitoring, name: Grafana, url: "http://localhost:{{ homelab_grafana_port }}"}
+
+# The launcher icon. Empty = the built-in one (files/homelab.svg). To use your
+# own, give the path of an .svg or .png on this machine (a square image, 256 px
+# or larger for PNG), e.g. "/home/you/Pictures/homelab.svg", and run the role again.
+homelab_gui_icon: ""
+homelab_gui_icon_dir: "/home/{{ desktop_user }}/.local/share/icons/hicolor"

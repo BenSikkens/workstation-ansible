@@ -1,0 +1,19 @@
+#!/bin/bash
+# Starts the dashboard if needed and opens it in your browser, signed in.
+# Managed by Ansible (roles/homelab_gui). Local edits are overwritten.
+set -eu
+port={{ homelab_gui_port }}
+token_file="{{ homelab_gui_token_file }}"
+
+systemctl --user start homelab-gui.service
+for _ in $(seq 1 50); do
+  (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null && break
+  sleep 0.2
+done
+# The token travels in this URL once; the page swaps it for a cookie.
+url="http://127.0.0.1:$port/login?t=$(cat "$token_file")"
+if command -v xdg-open >/dev/null 2>&1; then
+  xdg-open "$url" >/dev/null 2>&1 &
+else
+  echo "Open this in your browser: $url"
+fi

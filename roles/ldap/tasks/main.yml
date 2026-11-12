@@ -1,0 +1,186 @@
+---
+# Identity stack part 1: lldap as a rootless Podman container (Quadlet, systemd
+# user service) under a dedicated service user, with an LDAPS certificate,
+# generated secrets, and the groups and bind account the stack needs. Mirrors
+# the structure of the forgejo and monitoring roles. The authelia role builds on it.
+
+- name: Install podman and rootless container dependencies
+  ansible.builtin.dnf:
+    name:
+      - podman
+      - passt
+      - fuse-overlayfs
+      - openssl
+    state: present
+  when: ansible_facts['os_family'] == "RedHat"
+
+- name: Create the identity user ({{ identity_user }})
+  ansible.builtin.user:
+    name: "{{ identity_user }}"
+    system: false
+    shell: /sbin/nologin
+    create_home: true
+    state: present
+
+- name: Enable systemd lingering for {{ identity_user }} (user services run without a login)
+  ansible.builtin.command: "loginctl enable-linger {{ identity_user }}"
+  args:
+    creates: "/var/lib/systemd/linger/{{ identity_user }}"
+
+- name: Look up the uid of {{ identity_user }}
+  ansible.builtin.command: "id -u {{ identity_user }}"
+  register: identity_uid_result
+  changed_when: false
+
+- name: Remember the uid
+  ansible.builtin.set_fact:
+    identity_uid: "{{ identity_uid_result.stdout }}"
+
+- name: Reload systemd unit cache (picks up the new user's user@.service instance)
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+# Same workaround as the forgejo and monitoring roles.
+- name: Ensure the systemd user manager of {{ identity_user }} is running
+  ansible.builtin.command: "systemctl start user@{{ identity_uid }}.service"  # noqa: command-instead-of-module
+  register: identity_user_manager_start
+  until: identity_user_manager_start.rc == 0
+  retries: 5
+  delay: 3
+  changed_when: true
+
+# --- directories --------------------------------------------------------------
+
+- name: Create the identity directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ identity_user }}"
+    group: "{{ identity_user }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ identity_dir }}", mode: "0700"}
+    - {path: "{{ identity_secrets_dir }}", mode: "0700"}
+    - {path: "{{ identity_tls_dir }}", mode: "0755"}
+    - {path: "/home/{{ identity_user }}/.config/containers/systemd", mode: "0755"}
+  loop_control:
+    label: "{{ item.path }}"
+
+# --- TLS and secrets ---------------------------------------------------------------
+
+- name: Certificate for LDAPS and Authelia
+  ansible.builtin.include_tasks: tls.yml
+
+- name: Generate the lldap secrets and the bind account's password
+  ansible.builtin.include_tasks: secret.yml
+  vars:
+    identity_secret_name: "{{ item }}"
+  loop:
+    - identity_lldap_jwt_secret
+    - identity_lldap_admin_password
+    - identity_bind_password
+
+# --- Quadlet units ---------------------------------------------------------------------
+
+- name: Deploy the identity network Quadlet unit
+  ansible.builtin.template:
+    src: identity.network.j2
+    dest: "/home/{{ identity_user }}/.config/containers/systemd/identity.network"
+    owner: "{{ identity_user }}"
+    group: "{{ identity_user }}"
+    mode: "0644"
+    backup: true
+  register: identity_network_quadlet
+
+- name: Deploy the lldap Quadlet unit
+  ansible.builtin.template:
+    src: lldap.container.j2
+    dest: "/home/{{ identity_user }}/.config/containers/systemd/lldap.container"
+    owner: "{{ identity_user }}"
+    group: "{{ identity_user }}"
+    mode: "0644"
+    backup: true
+  register: identity_lldap_quadlet
+
+- name: Reload the systemd units of {{ identity_user }} (picks up changed Quadlets)
+  ansible.builtin.systemd:
+    daemon_reload: true
+    scope: user
+  become: true
+  become_user: "{{ identity_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ identity_uid }}"
+  when: identity_network_quadlet.changed or identity_lldap_quadlet.changed
+
+# Restarted when its unit or the certificate changed, otherwise just started.
+- name: Start lldap
+  ansible.builtin.systemd:
+    name: lldap.service
+    scope: user
+    state: "{{ 'restarted' if (identity_lldap_quadlet.changed or (identity_tls_files.changed | default(false))) else 'started' }}"
+    enabled: true
+  become: true
+  become_user: "{{ identity_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ identity_uid }}"
+
+- name: Create groups and the bind account in lldap
+  ansible.builtin.include_tasks: provision.yml
+
+# --- this machine ------------------------------------------------------------------------
+
+- name: Make the names resolve on this machine (/etc/hosts)
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} ANSIBLE MANAGED BLOCK: identity (roles/ldap)"
+    block: "{{ identity_hosts_address }} {{ identity_ldap_host }} {{ identity_auth_host }}"
+  when: identity_manage_hosts | bool
+
+- name: Check whether firewalld is running
+  ansible.builtin.command: systemctl is-active --quiet firewalld  # noqa: command-instead-of-module
+  register: identity_firewalld
+  changed_when: false
+  failed_when: false
+
+# The ports are published on identity_bind_address so pods can reach them via
+# the node. Without a rule, the LAN could too. Pods are not affected: their
+# networks are in the `trusted` zone by source, which takes precedence.
+- name: Keep the LDAPS and Authelia ports off the LAN
+  ansible.posix.firewalld:
+    rich_rule: 'rule family="{{ item.0 }}" port port="{{ item.1 }}" protocol="tcp" reject'
+    permanent: true
+    immediate: true
+    state: "{{ 'disabled' if (identity_lan_access | bool) else 'enabled' }}"
+  loop: "{{ ['ipv4', 'ipv6'] | product([identity_ldaps_port, identity_authelia_port]) | list }}"
+  loop_control:
+    label: "{{ item.0 }}/{{ item.1 }}"
+  when:
+    - identity_manage_firewalld | bool
+    - identity_firewalld.rc == 0
+
+# --- k3s and shell helpers ----------------------------------------------------------------
+
+- name: Create the directory for the k3s manifests
+  ansible.builtin.file:
+    path: "{{ identity_user_share_dir }}"
+    state: directory
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0755"
+
+- name: Write the CoreDNS override for k3s (applied by identity-k3s-link)
+  ansible.builtin.template:
+    src: k3s-dns.yaml.j2
+    dest: "{{ identity_user_share_dir }}/k3s-dns.yaml"
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0644"
+
+# No `backup: true`: everything in ~/.bashrc.d is sourced.
+- name: Install the identity shell helpers (identity-k3s-link, identity-oidc-secret, identity-info)
+  ansible.builtin.template:
+    src: identity.sh.j2
+    dest: "/home/{{ desktop_user }}/.bashrc.d/identity.sh"
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0644"

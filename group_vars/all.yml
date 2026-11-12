@@ -27,6 +27,23 @@ forgejo_runner_install_trivy: true
 forgejo_backup_enabled: true
 # forgejo_backup_dir: /var/backups/forgejo   # root-only; needs free space for a copy of the data
 
+# --- Identity: lldap (users, groups) + Authelia (OpenID Connect) ---------------
+# For the apps you build and run in k3s (and later Forgejo, Grafana). Both run
+# under a dedicated 'ldap' user; see docs/roles/ldap.md and docs/roles/authelia.md.
+# Before the first run: `mkcert -install` once as your desktop user (the TLS
+# certificate comes from its CA). Everything below is optional; the defaults
+# are in roles/ldap/defaults/main.yml.
+#
+# identity_domain: lab.internal          # auth.<domain> and ldap.<domain>
+# identity_ldap_groups: [homelab-users]  # groups to create in lldap
+#
+# One entry per app that signs users in with OpenID Connect:
+# authelia_oidc_clients:
+#   - id: myapp
+#     name: My App
+#     redirect_uris:
+#       - https://myapp.lab.internal/oauth2/callback
+
 # --- Monitoring -----------------------------------------------------------
 # Grafana + Prometheus + Loki under a dedicated 'monitoring' user, plus the
 # agents that feed them (see docs/roles/monitoring.md). Everything
@@ -41,3 +58,8 @@ monitoring_enabled: true
 # homelab_users:
 #   - "{{ desktop_user }}"
 #   - another_user
+
+# --- JupyterLab (per user, via pipx) -----------------------------------------
+# Extra packages to install INTO JupyterLab's own environment (extensions, language
+# servers). Project libraries belong in the project's own venv, not here.
+# jupyter_extra_packages: [jupyterlab-lsp, python-lsp-server]

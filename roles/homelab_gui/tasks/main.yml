@@ -1,0 +1,165 @@
+---
+# The homelab dashboard for {{ desktop_user }}: see docs/roles/homelab_gui.md.
+# Python standard library only, no packages to install. Files are owned by
+# {{ desktop_user }}; the service runs as that user, so the homelab group's sudo
+# rules apply exactly as they do in a terminal.
+
+- name: Create the dashboard directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ homelab_gui_dir }}", mode: "0755"}
+    - {path: "{{ homelab_gui_config_dir }}", mode: "0700"}
+    - {path: "/home/{{ desktop_user }}/.local/bin", mode: "0755"}
+    - {path: "/home/{{ desktop_user }}/.local/share/applications", mode: "0755"}
+    - {path: "/home/{{ desktop_user }}/.config/systemd/user", mode: "0755"}
+
+- name: Install the dashboard (server and page)
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ homelab_gui_dir }}/{{ item }}"
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0644"
+  loop:
+    - server.py
+    - index.html
+    - app.js
+    - app.css
+  register: homelab_gui_files
+
+- name: Write its settings
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ homelab_gui_config_dir }}/config.json"
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0600"
+  register: homelab_gui_config
+
+# The secret behind the sign-in cookie. Created once, never overwritten.
+- name: Generate the access token (0600)
+  ansible.builtin.shell: "umask 077 && openssl rand -hex 32 > {{ homelab_gui_token_file }}"
+  args:
+    creates: "{{ homelab_gui_token_file }}"
+  become: true
+  become_user: "{{ desktop_user }}"
+
+# The desktop entry says Icon=homelab; GNOME finds it in the user's icon theme.
+- name: Work out which icon file to install
+  ansible.builtin.set_fact:
+    homelab_gui_icon_src: "{{ homelab_gui_icon if homelab_gui_icon | length > 0 else role_path ~ '/files/homelab.svg' }}"
+
+- name: Check the icon is an .svg or .png file
+  ansible.builtin.assert:
+    that: homelab_gui_icon_src | lower is regex('\\.(svg|png)$')
+    fail_msg: "homelab_gui_icon must be an .svg or .png file (got {{ homelab_gui_icon_src }})."
+    quiet: true
+
+- name: Work out where the icon goes
+  ansible.builtin.set_fact:
+    homelab_gui_icon_is_svg: "{{ homelab_gui_icon_src | lower is regex('\\.svg$') }}"
+    homelab_gui_icon_apps_dir: "{{ homelab_gui_icon_dir }}/{{ homelab_gui_icon_src | lower is regex('\\.svg$') | ternary('scalable', '512x512') }}/apps"
+    homelab_gui_icon_stale: "{{ homelab_gui_icon_dir }}/{{ homelab_gui_icon_src | lower is regex('\\.svg$') | ternary('512x512/apps/homelab.png', 'scalable/apps/homelab.svg') }}"
+
+# Every level is created with the right owner (a bare `state: directory` would
+# leave root-owned parents inside the home folder).
+- name: Create the icon directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0755"
+  loop:
+    - "/home/{{ desktop_user }}/.local/share/icons"
+    - "{{ homelab_gui_icon_dir }}"
+    - "{{ homelab_gui_icon_apps_dir | dirname }}"
+    - "{{ homelab_gui_icon_apps_dir }}"
+
+- name: Remove an icon of the other type (so a switch between svg and png takes effect)
+  ansible.builtin.file:
+    path: "{{ homelab_gui_icon_stale }}"
+    state: absent
+
+- name: Install the icon
+  ansible.builtin.copy:
+    src: "{{ homelab_gui_icon_src }}"
+    dest: "{{ homelab_gui_icon_apps_dir }}/homelab.{{ homelab_gui_icon_is_svg | bool | ternary('svg', 'png') }}"
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0644"
+  register: homelab_gui_icon_file
+
+# Refreshes GNOME's icon cache when the tool exists; GNOME also notices on its own.
+- name: Refresh the icon cache  # noqa: no-handler
+  ansible.builtin.command: "gtk-update-icon-cache -f -t {{ homelab_gui_icon_dir }}"
+  become: true
+  become_user: "{{ desktop_user }}"
+  changed_when: false
+  failed_when: false
+  when: homelab_gui_icon_file.changed
+
+- name: Install the launcher command and the desktop entry
+  ansible.builtin.template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {src: homelab-gui.sh.j2, dest: "/home/{{ desktop_user }}/.local/bin/homelab-gui", mode: "0755"}
+    - {src: homelab.desktop.j2, dest: "/home/{{ desktop_user }}/.local/share/applications/homelab.desktop", mode: "0644"}
+
+- name: Install the systemd user service
+  ansible.builtin.template:
+    src: homelab-gui.service.j2
+    dest: "/home/{{ desktop_user }}/.config/systemd/user/homelab-gui.service"
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0644"
+  register: homelab_gui_unit
+
+- name: Look up the uid of {{ desktop_user }}
+  ansible.builtin.command: "id -u {{ desktop_user }}"
+  register: homelab_gui_uid
+  changed_when: false
+
+- name: Reload the user units  # noqa: no-handler
+  ansible.builtin.systemd:
+    daemon_reload: true
+    scope: user
+  become: true
+  become_user: "{{ desktop_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ homelab_gui_uid.stdout }}"
+  when: homelab_gui_unit.changed
+
+# Not enabled/started when autostart is off; `homelab gui` starts it on demand.
+# A changed file restarts a running dashboard (a stopped one stays stopped).
+- name: Enable the dashboard at login and start it
+  ansible.builtin.systemd:
+    name: homelab-gui.service
+    scope: user
+    enabled: true
+    state: "{{ 'restarted' if (homelab_gui_files.changed or homelab_gui_config.changed or homelab_gui_unit.changed) else 'started' }}"
+  become: true
+  become_user: "{{ desktop_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ homelab_gui_uid.stdout }}"
+  when: homelab_gui_autostart | bool
+
+- name: Restart a running dashboard after a change (autostart off)  # noqa: command-instead-of-module
+  ansible.builtin.command: systemctl --user try-restart homelab-gui.service
+  become: true
+  become_user: "{{ desktop_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ homelab_gui_uid.stdout }}"
+  changed_when: false
+  when:
+    - not (homelab_gui_autostart | bool)
+    - homelab_gui_files.changed or homelab_gui_config.changed or homelab_gui_unit.changed

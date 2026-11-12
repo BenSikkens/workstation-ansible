@@ -1,0 +1,64 @@
+# Helpers for the identity stack (lldap + Authelia). Managed by Ansible
+# (roles/ldap/templates/identity.sh.j2). Local edits are overwritten.
+{% raw %}
+
+# identity-info   where everything is
+{% endraw %}
+identity-info() {
+  cat <<INFO
+OIDC issuer:      https://{{ identity_auth_host }}:{{ identity_authelia_port }}
+Discovery:        https://{{ identity_auth_host }}:{{ identity_authelia_port }}/.well-known/openid-configuration
+LDAPS:            ldaps://{{ identity_ldap_host }}:{{ identity_ldaps_port }}
+Base DN:          {{ identity_base_dn }}
+lldap web UI:     http://localhost:{{ ldap_web_port }}   (user: admin)
+CA certificate:   {{ identity_user_share_dir }}/ca.pem
+Admin password:   sudo cat {{ identity_secrets_dir }}/identity_lldap_admin_password
+INFO
+}
+{% raw %}
+
+# identity-oidc-secret CLIENT   print the client secret of an OIDC client
+# (asks for your sudo password: the file belongs to the service user).
+identity-oidc-secret() {
+  if [ $# -ne 1 ]; then
+    echo "usage: identity-oidc-secret CLIENT_ID" >&2
+    return 2
+  fi
+  case "$1" in
+    *[!A-Za-z0-9._-]*) echo "identity-oidc-secret: bad client id" >&2; return 2 ;;
+  esac
+{% endraw %}
+  sudo cat "{{ identity_secrets_dir }}/oidc-client-$1.secret"
+}
+{% raw %}
+
+# identity-k3s-link [NAMESPACE...]
+#   1. makes the identity names resolve inside k3s (CoreDNS override);
+#   2. puts the CA certificate into each NAMESPACE as ConfigMap "homelab-ca"
+#      (key ca.crt), so your apps can mount it and verify the TLS certificates.
+# Safe to run again. Needs k3s running (homelab up k3s).
+identity-k3s-link() {
+{% endraw %}
+  local share="{{ identity_user_share_dir }}" ns
+{% raw %}
+  if ! command -v kubectl >/dev/null 2>&1; then
+    echo "identity-k3s-link: kubectl not found (is the k3s role installed?)" >&2
+    return 1
+  fi
+  if ! kubectl get nodes >/dev/null 2>&1; then
+    echo "identity-k3s-link: cannot reach the cluster (homelab up k3s)" >&2
+    return 1
+  fi
+  kubectl apply -f "$share/k3s-dns.yaml" || return 1
+  kubectl -n kube-system rollout restart deployment coredns || return 1
+  if [ ! -f "$share/ca.pem" ]; then
+    echo "identity-k3s-link: $share/ca.pem is missing; run the ldap role" >&2
+    return 1
+  fi
+  for ns in "$@"; do
+    kubectl get namespace "$ns" >/dev/null 2>&1 || kubectl create namespace "$ns" || return 1
+    kubectl -n "$ns" create configmap homelab-ca --from-file=ca.crt="$share/ca.pem" \
+      --dry-run=client -o yaml | kubectl apply -f - || return 1
+  done
+}
+{% endraw %}

@@ -14,6 +14,8 @@ each. Preview them with `ansible-playbook site.yml --check --diff`
 | CI image `Containerfile` | Rendered with `backup: true`; the image is rebuilt only when it changed or is missing. |
 | `~/.bashrc` | Only touched if it does not already load `~/.bashrc.d/` (Fedora's default does), and then via a marked block with a backup. The `homelab` command and k3s helpers are separate drop-ins in `~/.bashrc.d/`, written **without** backups because everything in that directory is sourced. |
 | Forgejo `app.ini`, vault and repository data | Never templated or written by this playbook. Forgejo manages them itself. |
+| `/etc/hosts` | Only a marked block is managed (`# BEGIN ANSIBLE MANAGED BLOCK: identity (roles/ldap)`); the rest is untouched. |
+| Identity stack: Quadlet units, `configuration.yml`, CoreDNS manifest, shell helper | Re-rendered each run. Units and `configuration.yml` use `backup: true`. Secrets, OIDC client secrets and the signing key are generated once and never overwritten. The TLS certificate is re-issued only when its names change or it expires within 30 days. The shell helper has no backup (it is sourced). |
 | `/etc/sudoers.d/homelab` | Generated and checked with `visudo -cf` before it is installed. |
 | k3s kubeconfig copy (`~/.kube/k3s.yaml`) | Overwritten from `/etc/rancher/k3s/k3s.yaml` on each run (and by `homelab up k3s`); shown with `diff: false` because it holds cluster credentials. |
 

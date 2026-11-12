@@ -5,7 +5,10 @@
 homelab_forgejo_user: "{{ forgejo_user | default('git') }}"
 homelab_forgejo_http_port: "{{ forgejo_http_port | default(3000) }}"
 homelab_monitoring_user: "{{ monitoring_user | default('monitoring') }}"
+homelab_identity_user: "{{ identity_user | default('ldap') }}"
 homelab_grafana_port: "{{ monitoring_grafana_port | default(3001) }}"
+homelab_lldap_port: "{{ ldap_web_port | default(17170) }}"
+homelab_auth_url: "https://{{ identity_auth_host | default('auth.lab.internal') }}:{{ identity_authelia_port | default(9443) }}"
 homelab_k3s_kubeconfig: "{{ k3s_kubeconfig_path | default('/home/' ~ desktop_user ~ '/.kube/k3s.yaml') }}"
 
 # --- who may run `homelab` without a password -------------------------------

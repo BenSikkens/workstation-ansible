@@ -32,19 +32,26 @@ Install one piece at a time with its tag, for example
 | `vscodium` | VSCodium | [page](docs/roles/vscodium.md) |
 | `keepassxc` | KeePassXC | [page](docs/roles/keepassxc.md) |
 | `mkcert` | mkcert | [page](docs/roles/mkcert.md) |
+| `ldap` | lldap user directory (LDAPS) | [page](docs/roles/ldap.md) |
+| `authelia` | Authelia: OpenID Connect for your apps | [page](docs/roles/authelia.md) |
 | `forgejo` | Forgejo git server + Actions runner + scanner CI image | [page](docs/roles/forgejo.md) |
 | `monitoring` | Grafana, Prometheus, Loki, Alloy, exporters | [page](docs/roles/monitoring.md) |
 | `k3s` | single-node Kubernetes next to Podman | [page](docs/roles/k3s.md) |
 | `obsidian` | Obsidian (Flatpak) | [page](docs/roles/obsidian.md) |
+| `dbeaver` | DBeaver Community (Flatpak) | [page](docs/roles/dbeaver.md) |
+| `postman` | Postman (Flatpak) | [page](docs/roles/postman.md) |
 | `todotxt` | todo.txt-cli + GNOME Shell extension | [page](docs/roles/todotxt.md) |
 | `devpod` | DevPod CLI | [page](docs/roles/devpod.md) |
+| `jupyter` | JupyterLab, per user (pipx) | [page](docs/roles/jupyter.md) |
 | `homelab` | `homelab` command, group, sudo rules | [page](docs/roles/homelab.md) |
+| `homelab_gui` | web dashboard for the homelab (`homelab gui`) | [page](docs/roles/homelab_gui.md) |
 | `bashrc_loader`, `monitor_app` | helper roles | [page](docs/roles/bashrc_loader.md), [page](docs/roles/monitor_app.md) |
 
 ## Everyday commands
 
 ```bash
-homelab up | down | status [forgejo|monitoring|k3s]
+homelab up | down | status [identity|forgejo|monitoring|k3s]
+homelab gui                      # web dashboard
 homelab add monitoring ~/Repositories/myproject/monitoring
 homelab add documentation ~/Repositories/myproject/docs
 ```

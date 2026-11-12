@@ -1,0 +1,22 @@
+# Managed by Ansible (roles/ldap). Makes the identity names resolve inside k3s,
+# to the host that runs the stack. Apply with: identity-k3s-link
+#
+# The names are real (they match the TLS certificate), so apps verify the
+# server normally. When the stack moves to another machine, change
+# identity_host_address, re-run the playbook and run identity-k3s-link again;
+# the apps keep using the same names.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: coredns-custom
+  namespace: kube-system
+data:
+  homelab-identity.server: |
+    {{ identity_domain }}:53 {
+        errors
+        cache 30
+        hosts {
+            {{ identity_host_address }} {{ identity_ldap_host }} {{ identity_auth_host }}
+            fallthrough
+        }
+    }

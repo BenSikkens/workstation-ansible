@@ -1,0 +1,154 @@
+---
+# Creates, through lldap's own HTTP API on loopback, what the stack needs:
+# the groups you listed and the read-only bind account for Authelia. Safe to
+# run again: it only creates what is missing, and sets the bind account's
+# password only when it creates the account.
+
+- name: Read the lldap admin password
+  ansible.builtin.slurp:
+    src: "{{ identity_secrets_dir }}/identity_lldap_admin_password"
+  register: ldap_admin_password
+  no_log: true
+
+- name: Wait for lldap and log in as admin
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ ldap_web_port }}/auth/simple/login"
+    method: POST
+    body_format: json
+    body:
+      username: admin
+      password: "{{ ldap_admin_password.content | b64decode | trim }}"
+    return_content: true
+  register: ldap_login
+  until: ldap_login.status | default(0) == 200
+  retries: 30
+  delay: 2
+  no_log: true
+
+- name: Remember the admin token
+  ansible.builtin.set_fact:
+    ldap_token: "{{ ldap_login.json.token }}"
+  no_log: true
+
+- name: List the existing groups and users
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ ldap_web_port }}/api/graphql"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ ldap_token }}"
+    body_format: json
+    body:
+      query: "{ groups { id displayName } users { id } }"
+    return_content: true
+  register: ldap_existing
+  no_log: true
+
+- name: Create the groups that are missing
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ ldap_web_port }}/api/graphql"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ ldap_token }}"
+    body_format: json
+    body:
+      query: "mutation CreateGroup($name: String!) {createGroup(name: $name) {id displayName}}"
+      variables:
+        name: "{{ item }}"
+  loop: "{{ identity_ldap_groups }}"
+  when: item not in (ldap_existing.json.data.groups | map(attribute='displayName') | list)
+  no_log: true
+
+- name: Create the bind account for Authelia (if it does not exist)
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ ldap_web_port }}/api/graphql"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ ldap_token }}"
+    body_format: json
+    body:
+      query: "mutation CreateUser($user: CreateUserInput!) {createUser(user: $user) {id}}"
+      variables:
+        user:
+          id: "{{ identity_bind_user }}"
+          email: "{{ identity_bind_user }}@{{ identity_domain }}"
+          displayName: "{{ identity_bind_user }} (service account)"
+  register: ldap_bind_created
+  when: identity_bind_user not in (ldap_existing.json.data.users | map(attribute='id') | list)
+  no_log: true
+
+- name: Read the generated bind password
+  ansible.builtin.slurp:
+    src: "{{ identity_secrets_dir }}/identity_bind_password"
+  register: ldap_bind_password
+  no_log: true
+
+- name: Check whether the bind account can log in with that password
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ ldap_web_port }}/auth/simple/login"
+    method: POST
+    body_format: json
+    body:
+      username: "{{ identity_bind_user }}"
+      password: "{{ ldap_bind_password.content | b64decode | trim }}"
+    status_code: [200, 400, 401, 403]
+  register: ldap_bind_login
+  changed_when: false
+  no_log: true
+
+# Runs whenever the stored password does not work (new account, or an earlier
+# run that stopped half way), so a failed first attempt heals itself.
+- name: Give the bind account a password and read-only rights
+  when: ldap_bind_login.status != 200
+  block:
+    - name: Set its password
+      ansible.builtin.command:
+        argv:
+          - podman
+          - exec
+          - -e
+          - IDENTITY_TOKEN
+          - -e
+          - LLDAP_USER_PASSWORD
+          - lldap
+          - sh
+          - -c
+          - '/app/lldap_set_password --base-url http://localhost:17170 --token "$IDENTITY_TOKEN" --username {{ identity_bind_user }} --password "$LLDAP_USER_PASSWORD"'
+      args:
+        chdir: "/home/{{ identity_user }}"
+      become: true
+      become_user: "{{ identity_user }}"
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ identity_uid }}"
+        IDENTITY_TOKEN: "{{ ldap_token }}"
+        LLDAP_USER_PASSWORD: "{{ ldap_bind_password.content | b64decode | trim }}"
+      changed_when: true
+      no_log: true
+
+    - name: Look up lldap's read-only group
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ ldap_web_port }}/api/graphql"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ ldap_token }}"
+        body_format: json
+        body:
+          query: "{ groups { id displayName } }"
+        return_content: true
+      register: ldap_groups_now
+      no_log: true
+
+    - name: Put the bind account in lldap_strict_readonly
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ ldap_web_port }}/api/graphql"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ ldap_token }}"
+        body_format: json
+        body:
+          query: "mutation AddUserToGroup($user: String!, $group: Int!) {addUserToGroup(userId: $user, groupId: $group) {ok}}"
+          variables:
+            user: "{{ identity_bind_user }}"
+            group: "{{ (ldap_groups_now.json.data.groups | selectattr('displayName', 'equalto', 'lldap_strict_readonly') | first).id }}"
+      register: ldap_readonly_added
+      failed_when: false
+      no_log: true

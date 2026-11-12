@@ -1,0 +1,174 @@
+---
+# The certificate used by lldap (LDAPS) and Authelia (HTTPS). Both mount
+# identity_tls_dir read-only. Files are 0644 on purpose: the containers run as
+# their own uids, which under rootless Podman are neither this owner nor its
+# group, so they read through the "other" bits. The directories above are 0700.
+
+- name: Names the certificate covers
+  ansible.builtin.set_fact:
+    identity_tls_names: "{{ ([identity_ldap_host, identity_auth_host, 'localhost', '127.0.0.1'] + identity_tls_extra_names) | unique }}"
+
+- name: Take the certificate and key you supplied
+  when: identity_tls_source == 'files'
+  block:
+    - name: Check that a certificate and key were given
+      ansible.builtin.assert:
+        that:
+          - identity_tls_cert_src | length > 0
+          - identity_tls_key_src | length > 0
+        fail_msg: "identity_tls_source is 'files': set identity_tls_cert_src and identity_tls_key_src."
+        quiet: true
+
+    - name: Install the certificate and key
+      ansible.builtin.copy:
+        src: "{{ item.src }}"
+        dest: "{{ identity_tls_dir }}/{{ item.dest }}"
+        owner: "{{ identity_user }}"
+        group: "{{ identity_user }}"
+        mode: "0644"
+      loop:
+        - {src: "{{ identity_tls_cert_src }}", dest: tls.crt}
+        - {src: "{{ identity_tls_key_src }}", dest: tls.key}
+      diff: false
+      loop_control:
+        label: "{{ item.dest }}"
+      register: identity_tls_files
+
+    - name: Install the CA certificate (optional)
+      ansible.builtin.copy:
+        src: "{{ identity_tls_ca_src }}"
+        dest: "{{ identity_tls_dir }}/ca.pem"
+        owner: "{{ identity_user }}"
+        group: "{{ identity_user }}"
+        mode: "0644"
+      when: identity_tls_ca_src | length > 0
+
+- name: Issue the certificate with mkcert
+  when: identity_tls_source == 'mkcert'
+  block:
+    - name: Find the mkcert CA of {{ desktop_user }}
+      ansible.builtin.command: mkcert -CAROOT
+      become: true
+      become_user: "{{ desktop_user }}"
+      register: identity_caroot
+      changed_when: false
+
+    - name: Look for the CA files
+      ansible.builtin.stat:
+        path: "{{ identity_caroot.stdout }}/rootCA.pem"
+      register: identity_ca_stat
+
+    - name: Check that the mkcert CA exists
+      ansible.builtin.assert:
+        that: identity_ca_stat.stat.exists
+        fail_msg: >-
+          mkcert has no CA for {{ desktop_user }} yet. Run `mkcert -install` once as
+          {{ desktop_user }} (it also makes browsers trust the certificate), then run this again.
+        quiet: true
+
+    - name: Look at the current certificate
+      ansible.builtin.stat:
+        path: "{{ identity_tls_dir }}/tls.crt"
+      register: identity_cert_stat
+
+    - name: Read the names the current certificate was issued for
+      ansible.builtin.slurp:
+        src: "{{ identity_tls_dir }}/names.txt"
+      register: identity_cert_names
+      failed_when: false
+
+    - name: Will the certificate expire within 30 days?
+      ansible.builtin.command: "openssl x509 -in {{ identity_tls_dir }}/tls.crt -noout -checkend 2592000"
+      register: identity_cert_check
+      changed_when: false
+      failed_when: false
+      when: identity_cert_stat.stat.exists
+
+    - name: Decide whether to issue a new certificate
+      ansible.builtin.set_fact:
+        identity_tls_renew: >-
+          {{ not identity_cert_stat.stat.exists
+             or (identity_cert_check.rc | default(1)) != 0
+             or (identity_cert_names.content | default('') | b64decode | trim) != (identity_tls_names | join(' ')) }}
+
+    - name: Issue the certificate
+      when: identity_tls_renew | bool
+      block:
+        - name: Make a scratch directory for mkcert
+          ansible.builtin.tempfile:
+            state: directory
+            suffix: identity-tls
+          register: identity_tls_tmp
+
+        - name: Let {{ desktop_user }} write into it
+          ansible.builtin.file:
+            path: "{{ identity_tls_tmp.path }}"
+            owner: "{{ desktop_user }}"
+            mode: "0700"
+
+        - name: Build the mkcert command line
+          ansible.builtin.set_fact:
+            identity_mkcert_argv: >-
+              {{ ['mkcert', '-cert-file', identity_tls_tmp.path ~ '/tls.crt',
+                  '-key-file', identity_tls_tmp.path ~ '/tls.key'] + identity_tls_names }}
+
+        - name: Run mkcert
+          ansible.builtin.command:
+            argv: "{{ identity_mkcert_argv }}"
+          become: true
+          become_user: "{{ desktop_user }}"
+          changed_when: true
+
+        - name: Install the certificate and key
+          ansible.builtin.copy:
+            src: "{{ identity_tls_tmp.path }}/{{ item }}"
+            dest: "{{ identity_tls_dir }}/{{ item }}"
+            remote_src: true
+            owner: "{{ identity_user }}"
+            group: "{{ identity_user }}"
+            mode: "0644"
+          loop: [tls.crt, tls.key]
+          diff: false
+          register: identity_tls_files
+
+        - name: Remember which names it was issued for
+          ansible.builtin.copy:
+            content: "{{ identity_tls_names | join(' ') }}\n"
+            dest: "{{ identity_tls_dir }}/names.txt"
+            owner: "{{ identity_user }}"
+            group: "{{ identity_user }}"
+            mode: "0644"
+
+      always:
+        - name: Remove the scratch directory
+          ansible.builtin.file:
+            path: "{{ identity_tls_tmp.path }}"
+            state: absent
+          when: identity_tls_tmp.path is defined
+
+    - name: Keep a copy of the CA certificate next to the certificate
+      ansible.builtin.copy:
+        src: "{{ identity_caroot.stdout }}/rootCA.pem"
+        dest: "{{ identity_tls_dir }}/ca.pem"
+        remote_src: true
+        owner: "{{ identity_user }}"
+        group: "{{ identity_user }}"
+        mode: "0644"
+
+- name: Create the directory for {{ desktop_user }}'s copy of the CA certificate
+  ansible.builtin.file:
+    path: "{{ identity_user_share_dir }}"
+    state: directory
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0755"
+
+- name: Give {{ desktop_user }} the CA certificate (public; apps in k3s trust it)
+  ansible.builtin.copy:
+    src: "{{ identity_tls_dir }}/ca.pem"
+    dest: "{{ identity_user_share_dir }}/ca.pem"
+    remote_src: true
+    owner: "{{ desktop_user }}"
+    group: "{{ desktop_user }}"
+    mode: "0644"
+  failed_when: false

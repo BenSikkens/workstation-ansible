@@ -1,0 +1,6 @@
+---
+# bashrc_loader: the `identity-*` shell helpers are a ~/.bashrc.d drop-in.
+# mkcert: the TLS certificate for LDAPS and Authelia is issued by its local CA.
+dependencies:
+  - role: bashrc_loader
+  - role: mkcert

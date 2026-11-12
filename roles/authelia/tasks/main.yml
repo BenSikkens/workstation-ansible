@@ -1,0 +1,124 @@
+---
+# Identity stack part 2: Authelia as an OpenID Connect provider, on the same
+# user and Podman network as lldap (the ldap role, a dependency). See
+# defaults/main.yml for how to define OIDC clients.
+
+- name: Create the Authelia config directory
+  ansible.builtin.file:
+    path: "{{ authelia_config_dir }}"
+    state: directory
+    owner: "{{ identity_user }}"
+    group: "{{ identity_user }}"
+    mode: "0755"
+
+- name: Generate the Authelia secrets
+  ansible.builtin.include_role:
+    name: ldap
+    tasks_from: secret
+  vars:
+    identity_secret_name: "{{ item.name }}"
+    identity_secret_cmd: "{{ item.cmd | default('openssl rand -hex 32') }}"
+  loop:
+    - {name: authelia_session_secret, cmd: "openssl rand -hex 64"}
+    - {name: authelia_storage_key}
+    - {name: authelia_reset_jwt_secret}
+    - {name: authelia_oidc_hmac_secret}
+    - {name: authelia_oidc_jwks_key, cmd: "openssl genrsa 2048"}
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Make a secret and a digest for each confidential OIDC client
+  ansible.builtin.include_tasks: client.yml
+  vars:
+    authelia_client: "{{ item }}"
+  loop: "{{ authelia_oidc_clients }}"
+  loop_control:
+    label: "{{ item.id }}"
+  when: not (item.public | default(false) | bool)
+
+- name: Say that OIDC is not configured yet
+  ansible.builtin.debug:
+    msg: "authelia_oidc_clients is empty, so OpenID Connect is not enabled yet. See roles/authelia/defaults/main.yml."
+  when: authelia_oidc_clients | length == 0
+
+- name: Render the Authelia configuration
+  ansible.builtin.template:
+    src: configuration.yml.j2
+    dest: "{{ authelia_config_dir }}/configuration.yml"
+    owner: "{{ identity_user }}"
+    group: "{{ identity_user }}"
+    mode: "0644"
+    backup: true
+  register: authelia_config
+
+- name: Deploy the Authelia Quadlet unit
+  ansible.builtin.template:
+    src: authelia.container.j2
+    dest: "/home/{{ identity_user }}/.config/containers/systemd/authelia.container"
+    owner: "{{ identity_user }}"
+    group: "{{ identity_user }}"
+    mode: "0644"
+    backup: true
+  register: authelia_quadlet
+
+- name: Reload the systemd units of {{ identity_user }}
+  ansible.builtin.systemd:
+    daemon_reload: true
+    scope: user
+  become: true
+  become_user: "{{ identity_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ identity_uid }}"
+  when: authelia_quadlet.changed
+
+- name: Clear an earlier failed state (systemd gives up after five quick failures)
+  ansible.builtin.command: systemctl --user reset-failed authelia.service
+  become: true
+  become_user: "{{ identity_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ identity_uid }}"
+  changed_when: false
+  failed_when: false
+
+- name: Start Authelia
+  ansible.builtin.systemd:
+    name: authelia.service
+    scope: user
+    state: "{{ 'restarted' if (authelia_config.changed or authelia_quadlet.changed or (identity_tls_files.changed | default(false))) else 'started' }}"
+    enabled: true
+  become: true
+  become_user: "{{ identity_user }}"
+  environment:
+    XDG_RUNTIME_DIR: "/run/user/{{ identity_uid }}"
+
+- name: Wait until Authelia answers
+  block:
+    - name: Ask Authelia's health endpoint
+      ansible.builtin.uri:
+        url: "https://127.0.0.1:{{ identity_authelia_port }}/api/health"
+        validate_certs: false
+      register: authelia_health
+      until: authelia_health.status | default(0) == 200
+      retries: 20
+      delay: 3
+  rescue:
+    - name: Collect what Authelia and lldap logged
+      ansible.builtin.shell: |
+        echo "== authelia.service"; systemctl --user status authelia.service --no-pager 2>&1 | tail -n 15
+        echo "== podman logs authelia"; podman logs --tail 40 authelia 2>&1
+        echo "== journal"; journalctl --user -u authelia.service -n 30 --no-pager 2>&1
+        echo "== lldap.service"; systemctl --user is-active lldap.service 2>&1
+      args:
+        chdir: "/home/{{ identity_user }}"
+        executable: /bin/bash
+      become: true
+      become_user: "{{ identity_user }}"
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ identity_uid }}"
+      register: authelia_failure_log
+      changed_when: false
+      failed_when: false
+
+    - name: Show it
+      ansible.builtin.fail:
+        msg: "Authelia did not answer on port {{ identity_authelia_port }}. What it logged:\n{{ authelia_failure_log.stdout | default('(nothing)') }}"

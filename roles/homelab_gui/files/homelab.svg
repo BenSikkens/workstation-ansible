@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3b7bb0"/>
+      <stop offset="1" stop-color="#245077"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#bg)"/>
+  <!-- three server units -->
+  <g fill="#f4f7fb">
+    <rect x="24" y="26" width="80" height="22" rx="6"/>
+    <rect x="24" y="53" width="80" height="22" rx="6"/>
+    <rect x="24" y="80" width="80" height="22" rx="6"/>
+  </g>
+  <!-- status lights -->
+  <circle cx="38" cy="37" r="4.5" fill="#2a8a4a"/>
+  <circle cx="38" cy="64" r="4.5" fill="#2a8a4a"/>
+  <circle cx="38" cy="91" r="4.5" fill="#e0a64a"/>
+  <!-- drive slots -->
+  <g stroke="#9db4c9" stroke-width="3" stroke-linecap="round">
+    <path d="M56 37h36M56 64h36M56 91h36"/>
+  </g>
+</svg>

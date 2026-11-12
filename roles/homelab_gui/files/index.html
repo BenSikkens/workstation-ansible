@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Homelab</title>
+<link rel="stylesheet" href="/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'%3E%3Crect x='4' y='4' width='120' height='120' rx='28' fill='%23306998'/%3E%3Cg fill='%23f4f7fb'%3E%3Crect x='24' y='26' width='80' height='22' rx='6'/%3E%3Crect x='24' y='53' width='80' height='22' rx='6'/%3E%3Crect x='24' y='80' width='80' height='22' rx='6'/%3E%3C/g%3E%3Ccircle cx='38' cy='37' r='4.5' fill='%232a8a4a'/%3E%3Ccircle cx='38' cy='64' r='4.5' fill='%232a8a4a'/%3E%3Ccircle cx='38' cy='91' r='4.5' fill='%23e0a64a'/%3E%3C/svg%3E">
+</head>
+<body>
+<header>
+  <h1>Homelab</h1>
+  <div class="spacer"></div>
+  <span id="updated" class="muted"></span>
+  <button id="start-all" class="btn primary">Start all</button>
+  <button id="stop-all" class="btn danger">Stop all</button>
+</header>
+
+<main>
+  <div id="notes"></div>
+  <section id="groups" aria-live="polite"></section>
+
+  <section id="job" class="panel" hidden>
+    <div class="panel-head">
+      <h2 id="job-title">Action</h2>
+      <span id="job-state" class="pill"></span>
+      <div class="spacer"></div>
+      <button id="job-close" class="btn small">Close</button>
+    </div>
+    <pre id="job-output"></pre>
+  </section>
+
+  <section id="logs" class="panel">
+    <div class="panel-head">
+      <h2>Logs</h2>
+      <select id="log-unit" aria-label="Unit"></select>
+      <label class="check"><input type="checkbox" id="log-follow" checked> Follow</label>
+      <button id="log-refresh" class="btn small">Refresh</button>
+    </div>
+    <pre id="log-output" tabindex="0">Pick a unit.</pre>
+  </section>
+
+  <section id="info" class="panel" hidden>
+    <div class="panel-head"><h2>Identity details</h2></div>
+    <pre id="info-output"></pre>
+    <p class="muted small">Passwords are never shown here. Run the <code>sudo cat</code> command above in a terminal.</p>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

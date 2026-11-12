@@ -11,7 +11,7 @@ Tag: `flatpak_setup`. Source: `roles/flatpak_setup/`.
 
 ## Used by
 
-[podman_desktop](podman_desktop.md) and [obsidian](obsidian.md) declare it in
+[podman_desktop](podman_desktop.md), [obsidian](obsidian.md), [dbeaver](dbeaver.md) and [postman](postman.md) declare it in
 their `meta/main.yml`, so `--tags podman_desktop` or `--tags obsidian` works on
 its own.
 

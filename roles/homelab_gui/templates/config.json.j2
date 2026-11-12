@@ -1,0 +1,9 @@
+{{ {
+  'port': homelab_gui_port,
+  'token_file': homelab_gui_token_file,
+  'homelab_sh': '/home/' ~ desktop_user ~ '/.bashrc.d/homelab.sh',
+  'identity_sh': '/home/' ~ desktop_user ~ '/.bashrc.d/identity.sh',
+  'homelab_group': homelab_group,
+  'log_lines': homelab_gui_log_lines,
+  'links': homelab_gui_links
+} | to_nice_json }}

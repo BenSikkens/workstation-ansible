@@ -1,0 +1,55 @@
+---
+# JupyterLab for desktop_user, per user and isolated (pipx). Nothing is
+# installed into the system Python, which Fedora marks as externally managed.
+# Runs as desktop_user, so everything lands in ~/.local (apps in ~/.local/bin,
+# the environment in ~/.local/share/pipx/venvs/jupyterlab).
+#
+# Never upgrades by itself: `pipx upgrade jupyterlab` when you want a newer one.
+
+- name: Install pipx
+  ansible.builtin.dnf:
+    name: pipx
+    state: present
+
+- name: Read what pipx has installed for {{ desktop_user }}
+  ansible.builtin.command: pipx list --json
+  become: true
+  become_user: "{{ desktop_user }}"
+  environment:
+    HOME: "/home/{{ desktop_user }}"
+  register: jupyter_pipx_before
+  changed_when: false
+
+- name: Install {{ jupyter_package }}
+  ansible.builtin.command: "pipx install {{ jupyter_package }}"
+  become: true
+  become_user: "{{ desktop_user }}"
+  environment:
+    HOME: "/home/{{ desktop_user }}"
+  when: jupyter_package not in (jupyter_pipx_before.stdout | from_json).venvs
+  changed_when: true
+
+- name: Read what is installed after that
+  ansible.builtin.command: pipx list --json
+  become: true
+  become_user: "{{ desktop_user }}"
+  environment:
+    HOME: "/home/{{ desktop_user }}"
+  register: jupyter_pipx_now
+  changed_when: false
+
+# pipx only exposes the main package's commands (jupyter-lab ...), not the
+# plain `jupyter` command, which belongs to jupyter-core. `jupyter lab`,
+# `jupyter kernelspec` and friends need it, so jupyter-core is injected with
+# its apps exposed. Together with the user's own extras:
+- name: Inject jupyter-core and the extra packages (pipx)
+  ansible.builtin.command: "pipx inject --include-apps {{ jupyter_package }} {{ item | quote }}"
+  become: true
+  become_user: "{{ desktop_user }}"
+  environment:
+    HOME: "/home/{{ desktop_user }}"
+  loop: "{{ ['jupyter-core'] + jupyter_extra_packages }}"
+  when: >-
+    (item | regex_replace('[\\[<>=!~ ;@].*$', '') | lower | replace('_', '-'))
+    not in ((jupyter_pipx_now.stdout | from_json).venvs[jupyter_package].metadata.injected_packages | default({}))
+  changed_when: true

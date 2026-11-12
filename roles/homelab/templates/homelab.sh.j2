@@ -3,13 +3,15 @@
 #   homelab up      [scope]   start it
 #   homelab down    [scope]   stop it (plus any CI containers left behind)
 #   homelab status  [scope]   show what is running
+#   homelab gui               open the web dashboard (homelab_gui role)
 #
 #   homelab add monitoring [--name NAME] PATH...   put a project's Grafana dashboards
 #                             (and data source files) into the monitoring stack
 #   homelab add documentation PATH   register a folder of Markdown files as an Obsidian vault
 #   homelab remove monitoring NAME | remove documentation PATH   undo the above
 #
-# scope: forgejo      Forgejo and its Actions runner
+# scope: identity     lldap (users, groups) and Authelia (OpenID Connect); "ldap" is an alias
+#        forgejo      Forgejo and its Actions runner
 #        monitoring   Grafana, Prometheus, Loki, Alloy, Pushgateway, Podman exporters
 #        k3s          the k3s Kubernetes cluster
 #        all          everything that is installed (default)
@@ -33,8 +35,11 @@
 # Settings only (who runs what, what URLs to print), not install state.
 HOMELAB_FORGEJO_USER="{{ homelab_forgejo_user }}"
 HOMELAB_MONITORING_USER="{{ homelab_monitoring_user }}"
+HOMELAB_IDENTITY_USER="{{ homelab_identity_user }}"
 HOMELAB_WEB_URL="http://localhost:{{ homelab_forgejo_http_port }}"
 HOMELAB_GRAFANA_URL="http://localhost:{{ homelab_grafana_port }}"
+HOMELAB_LLDAP_URL="http://localhost:{{ homelab_lldap_port }}"
+HOMELAB_AUTH_URL="{{ homelab_auth_url }}"
 HOMELAB_K3S_KUBECONFIG="{{ homelab_k3s_kubeconfig }}"
 HOMELAB_K3S_BIN="{{ homelab_k3s_bin }}"
 HOMELAB_K3S_KUBECONFIG_SRC="{{ homelab_k3s_kubeconfig_src }}"
@@ -48,8 +53,14 @@ HOMELAB_OBSIDIAN_TOOL="{{ homelab_libexec_dir }}/homelab-obsidian"
 # group is its "anchor": the group counts as installed when it exists. The
 # first <CORE> units decide whether the group is running; the rest are listed
 # but do not make it "degraded" on their own.
-_HOMELAB_GROUPS=(forgejo monitoring k3s)
+_HOMELAB_GROUPS=(identity forgejo monitoring k3s)
 _HOMELAB_ME=$(id -un)
+
+_HL_UNITS_identity=(
+  "$HOMELAB_IDENTITY_USER:lldap.service"
+  "$HOMELAB_IDENTITY_USER:authelia.service"
+)
+_HL_CORE_identity=2
 
 _HL_UNITS_forgejo=(
   "$HOMELAB_FORGEJO_USER:forgejo.service"
@@ -96,6 +107,7 @@ _homelab_group_core() { local v="_HL_CORE_$1"; echo "${!v}"; }
 
 _homelab_title() {
   case "$1" in
+    identity) echo "Identity (lldap, Authelia)" ;;
     forgejo) echo "Forgejo stack" ;;
     monitoring) echo "Monitoring" ;;
     k3s) echo "k3s" ;;
@@ -220,6 +232,10 @@ _homelab_report() {
 
 _homelab_extra() {
   case "$1" in
+    identity)
+      echo "  OIDC issuer: $HOMELAB_AUTH_URL"
+      echo "  lldap UI: $HOMELAB_LLDAP_URL"
+      ;;
     forgejo) echo "  Web UI: $HOMELAB_WEB_URL" ;;
     monitoring) echo "  Grafana: $HOMELAB_GRAFANA_URL" ;;
     k3s)
@@ -251,7 +267,52 @@ _homelab_status() {
   return 1
 }
 
+# Machine-readable status for the web dashboard (homelab status [scope] --porcelain).
+# Tab separated, one record per line:
+#   G <group> <running|degraded|stopped> <title>
+#   U <group> <unit> <active state | not installed> <owner>
+#   M <group not installed>
+_homelab_porcelain() {
+  local scope=$1 g spec i ncore running verdict state m
+  local -a specs=()
+  _homelab_probe_all
+  _homelab_select "$scope" || return 2
+  for g in "${_HL_SELECTED[@]}"; do
+    ncore=$(_homelab_group_core "$g")
+    mapfile -t specs < <(_homelab_group_units "$g")
+    running=0
+    for i in "${!specs[@]}"; do
+      if [ "$i" -lt "$ncore" ] && [ "${_HL_ACTIVE[${specs[$i]}]:-}" = active ] \
+        && [ "${_HL_LOAD[${specs[$i]}]:-}" = loaded ]; then
+        running=$((running + 1))
+      fi
+    done
+    if [ "$running" -eq "$ncore" ]; then
+      verdict=running
+    elif [ "$running" -eq 0 ]; then
+      verdict=stopped
+    else
+      verdict=degraded
+    fi
+    printf 'G\t%s\t%s\t%s\n' "$g" "$verdict" "$(_homelab_title "$g")"
+    for spec in "${specs[@]}"; do
+      if [ "${_HL_LOAD[$spec]:-}" = loaded ]; then state=${_HL_ACTIVE[$spec]:-unknown}; else state="not installed"; fi
+      printf 'U\t%s\t%s\t%s\t%s\n' "$g" "${spec#*:}" "$state" "${spec%%:*}"
+    done
+  done
+  for m in $_HL_MISSING; do
+    printf 'M\t%s\n' "$m"
+  done
+}
+
 # ----------------------------------------------------------------------- up
+
+_homelab_up_identity() {
+  local -a u
+  mapfile -t u < <(_homelab_group_units identity)
+  # Directory first, then the OIDC provider that reads it.
+  _homelab_units_do start "${u[@]}"
+}
 
 _homelab_up_forgejo() {
   local -a u
@@ -318,6 +379,13 @@ _homelab_stop_leftovers() {
   _homelab_as_user "$HOMELAB_FORGEJO_USER" podman stop --time 10 "${stop[@]}" >/dev/null 2>&1
 }
 
+_homelab_down_identity() {
+  # Reverse of start order.
+  _homelab_units_do stop \
+    "$HOMELAB_IDENTITY_USER:authelia.service" \
+    "$HOMELAB_IDENTITY_USER:lldap.service"
+}
+
 _homelab_down_monitoring() {
   # Reverse of start order. The Podman socket stays (Forgejo may need it).
   _homelab_units_do stop \
@@ -360,7 +428,7 @@ _homelab_down() {
   local scope=$1 g rc=0 i
   _homelab_probe_all
   _homelab_select "$scope" || return 2
-  # Reverse order: k3s, monitoring, Forgejo.
+  # Reverse order: k3s, monitoring, Forgejo, identity.
   for ((i = ${#_HL_SELECTED[@]} - 1; i >= 0; i--)); do
     g=${_HL_SELECTED[$i]}
     echo "Stopping $(_homelab_title "$g")..."
@@ -449,20 +517,38 @@ homelab() {
       return $?
       ;;
   esac
-  local scope=${2:-all}
+  local scope=all arg porcelain=0
+  for arg in "${@:2}"; do
+    case "$arg" in
+      --porcelain) porcelain=1 ;;
+      *) scope=$arg ;;
+    esac
+  done
+  [ "$scope" = ldap ] && scope=identity
   case "$scope" in
-    all | forgejo | monitoring | k3s) ;;
+    all | identity | forgejo | monitoring | k3s) ;;
     *)
-      echo "homelab: unknown scope '$scope' (use forgejo, monitoring, k3s or all)" >&2
+      echo "homelab: unknown scope '$scope' (use identity, forgejo, monitoring, k3s or all)" >&2
       return 2
       ;;
   esac
   case "${1:-}" in
     up)     _homelab_up "$scope" ;;
     down)   _homelab_down "$scope" ;;
-    status) _homelab_status "$scope" ;;
+    status)
+      if [ "$porcelain" -eq 1 ]; then _homelab_porcelain "$scope"; else _homelab_status "$scope"; fi
+      ;;
+    gui)
+      if command -v homelab-gui >/dev/null 2>&1; then
+        homelab-gui
+      else
+        echo "homelab: the dashboard is not installed (ansible-playbook site.yml --tags homelab_gui)" >&2
+        return 1
+      fi
+      ;;
     *)
-      echo "Usage: homelab {up|down|status} [forgejo|monitoring|k3s|all]" >&2
+      echo "Usage: homelab {up|down|status} [identity|forgejo|monitoring|k3s|all]" >&2
+      echo "       homelab gui                                  (web dashboard)" >&2
       echo "       homelab {add|remove} {monitoring|documentation} ...   (see: homelab add)" >&2
       return 2
       ;;
@@ -472,11 +558,11 @@ homelab() {
 _homelab_complete() {
   local cur=${COMP_WORDS[COMP_CWORD]} verb=${COMP_WORDS[1]:-}
   case "$COMP_CWORD" in
-    1) mapfile -t COMPREPLY < <(compgen -W "up down status add remove" -- "$cur") ;;
+    1) mapfile -t COMPREPLY < <(compgen -W "up down status gui add remove" -- "$cur") ;;
     2)
       case "$verb" in
         add | remove) mapfile -t COMPREPLY < <(compgen -W "monitoring documentation" -- "$cur") ;;
-        *) mapfile -t COMPREPLY < <(compgen -W "all forgejo monitoring k3s" -- "$cur") ;;
+        *) mapfile -t COMPREPLY < <(compgen -W "all identity forgejo monitoring k3s" -- "$cur") ;;
       esac
       ;;
     *)

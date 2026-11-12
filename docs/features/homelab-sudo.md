@@ -17,8 +17,9 @@ fails, the file is not installed.
 
 ## What members can do
 
-- start, stop and read the status of the listed units: Forgejo, the runner, the
-  Podman socket, Pushgateway, exporter, Prometheus, Loki, Grafana, Alloy, k3s
+- start, stop and read the status of the listed units: lldap, Authelia, Forgejo,
+  the runner, the Podman socket, Pushgateway, exporter, Prometheus, Loki,
+  Grafana, Alloy, k3s
   (Grafana may also be restarted, for `homelab add monitoring`);
 - list and stop `git`'s running containers (one wildcard, limited to
   `podman stop --time 10 *`);
@@ -80,8 +81,8 @@ This only works once the role has created the group and the sudoers file.
 ## Two things to know
 
 - **Run the role after installing services.** The rules pin the service users'
-  uid, so a user that does not exist yet gets no rules. After installing Forgejo
-  or monitoring, run `ansible-playbook site.yml --tags homelab --ask-become-pass`
+  uid, so a user that does not exist yet gets no rules. After installing Forgejo,
+  monitoring or the identity stack, run `ansible-playbook site.yml --tags homelab --ask-become-pass`
   once.
 - **The k3s kubeconfig rule is effectively root.** `homelab up k3s` copies the
   cluster-admin kubeconfig, so one rule (`cat` of `/etc/rancher/k3s/k3s.yaml`)

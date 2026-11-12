@@ -1,0 +1,200 @@
+---
+# Back up or restore the identity stack (lldap users and groups, Authelia's
+# database, and the generated secrets).
+#
+#   ansible-playbook identity-backup.yml --ask-become-pass
+#       stops lldap and Authelia, writes an archive into /var/backups/identity
+#       (root-only), starts them again
+#
+#   ansible-playbook identity-backup.yml --ask-become-pass \
+#       -e identity_restore_from=/var/backups/identity/identity-<timestamp>.tar
+#       stops them, puts the archive's contents back, starts them again
+#
+# The archive holds the volumes `lldap-data` and `authelia-data`, the secrets
+# (/home/<identity user>/identity/secrets) and the TLS files, so it contains
+# private keys and password hashes: keep it somewhere you trust. This is also
+# how the stack moves to another machine: back up here, install the roles
+# there (ansible-playbook site.yml --tags authelia), restore, then point the
+# names at the new host (see docs/features/identity-moving.md).
+#
+# Not covered: container images (pulled again). Restoring re-creates the Podman
+# secrets from the restored secret files.
+
+- name: Back up or restore the identity stack
+  hosts: workstation
+  become: true
+  gather_facts: false
+
+  vars:
+    identity_user: ldap
+    identity_backup_dir: /var/backups/identity
+    identity_restore_from: ""
+    identity_podman_env:
+      XDG_RUNTIME_DIR: "/run/user/{{ identity_uid_result.stdout | default('') }}"
+
+  tasks:
+    - name: Look up the uid of the identity user
+      ansible.builtin.command: "id -u {{ identity_user }}"
+      register: identity_uid_result
+      changed_when: false
+
+    - name: Check that the stack is installed
+      ansible.builtin.stat:
+        path: "/home/{{ identity_user }}/identity/secrets"
+      register: identity_secrets_stat
+
+    - name: Stop if there is nothing to back up
+      ansible.builtin.fail:
+        msg: "{{ identity_user }} has no identity directory; install the stack first (ansible-playbook site.yml --tags authelia)."
+      when: not identity_secrets_stat.stat.exists
+
+    - name: Look at the restore archive
+      ansible.builtin.stat:
+        path: "{{ identity_restore_from }}"
+      register: identity_restore_stat
+      when: identity_restore_from | length > 0
+
+    - name: Check the restore archive exists
+      ansible.builtin.assert:
+        that: identity_restore_stat.stat.exists
+        fail_msg: "{{ identity_restore_from }} does not exist."
+        quiet: true
+      when: identity_restore_from | length > 0
+
+    - name: Stop Authelia and lldap
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        scope: user
+        state: stopped
+      become: true
+      become_user: "{{ identity_user }}"
+      environment: "{{ identity_podman_env }}"
+      loop: [authelia.service, lldap.service]
+      failed_when: false
+
+    - name: Back up
+      when: identity_restore_from | length == 0
+      block:
+        - name: Make the backup directory (root only)
+          ansible.builtin.file:
+            path: "{{ identity_backup_dir }}"
+            state: directory
+            owner: root
+            group: root
+            mode: "0700"
+
+        - name: Name this backup
+          ansible.builtin.set_fact:
+            identity_backup_stamp: "{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
+
+        - name: Export the volumes
+          ansible.builtin.command: "podman volume export {{ item }} --output /tmp/{{ item }}-{{ identity_backup_stamp }}.tar"
+          args:
+            chdir: "/home/{{ identity_user }}"
+          become: true
+          become_user: "{{ identity_user }}"
+          environment: "{{ identity_podman_env }}"
+          loop: [lldap-data, authelia-data]
+          changed_when: true
+          failed_when: false
+          register: identity_export
+
+        - name: Put the volumes and the files into one archive
+          ansible.builtin.shell: |
+            set -e
+            stage=$(mktemp -d)
+            for v in lldap-data authelia-data; do
+              [ -f /tmp/$v-{{ identity_backup_stamp }}.tar ] && install -m 0600 /tmp/$v-{{ identity_backup_stamp }}.tar "$stage/$v.tar"
+            done
+            tar -C /home/{{ identity_user }} -cf "$stage/files.tar" identity
+            tar -C "$stage" -cf {{ identity_backup_dir }}/identity-{{ identity_backup_stamp }}.tar .
+            chmod 0600 {{ identity_backup_dir }}/identity-{{ identity_backup_stamp }}.tar
+            rm -rf "$stage" /tmp/lldap-data-{{ identity_backup_stamp }}.tar /tmp/authelia-data-{{ identity_backup_stamp }}.tar
+          args:
+            executable: /bin/bash
+          changed_when: true
+
+        - name: Where the backup is
+          ansible.builtin.debug:
+            msg: "{{ identity_backup_dir }}/identity-{{ identity_backup_stamp }}.tar (root-only; contains private keys and password hashes)"
+
+    - name: Restore
+      when: identity_restore_from | length > 0
+      block:
+        - name: Unpack the archive
+          ansible.builtin.shell: |
+            set -e
+            stage=$(mktemp -d)
+            tar -C "$stage" -xf {{ identity_restore_from }}
+            echo "$stage"
+          args:
+            executable: /bin/bash
+          register: identity_restore_stage
+          changed_when: true
+
+        - name: Put the files back (secrets, certificate, configuration)
+          ansible.builtin.shell: |
+            set -e
+            tar -C /home/{{ identity_user }} -xf {{ identity_restore_stage.stdout }}/files.tar
+            chown -R {{ identity_user }}:{{ identity_user }} /home/{{ identity_user }}/identity
+          args:
+            executable: /bin/bash
+          changed_when: true
+
+        - name: Put the volumes back
+          ansible.builtin.shell: |
+            set -e
+            f={{ identity_restore_stage.stdout }}/{{ item }}.tar
+            [ -f "$f" ] || exit 0
+            install -m 0644 "$f" /tmp/{{ item }}-restore.tar
+            cd /home/{{ identity_user }}
+            p="runuser -u {{ identity_user }} -- env XDG_RUNTIME_DIR=/run/user/{{ identity_uid_result.stdout }} podman"
+            $p volume exists {{ item }} || $p volume create {{ item }}
+            $p volume import {{ item }} /tmp/{{ item }}-restore.tar
+            rm -f /tmp/{{ item }}-restore.tar
+          args:
+            executable: /bin/bash
+          loop: [lldap-data, authelia-data]
+          changed_when: true
+
+        # The roles create a Podman secret only if none exists, so after a
+        # restore (possibly onto a fresh install) the secrets must be replaced
+        # by the restored files, or the services would run with new values.
+        - name: Re-create the Podman secrets from the restored files
+          ansible.builtin.shell: |
+            set -e
+            p="runuser -u {{ identity_user }} -- env XDG_RUNTIME_DIR=/run/user/{{ identity_uid_result.stdout }} podman"
+            cd /home/{{ identity_user }}
+            f=/home/{{ identity_user }}/identity/secrets/{{ item }}
+            [ -f "$f" ] || exit 0
+            $p secret rm {{ item }} >/dev/null 2>&1 || true
+            $p secret create {{ item }} "$f"
+          args:
+            executable: /bin/bash
+          loop:
+            - identity_lldap_jwt_secret
+            - identity_lldap_admin_password
+            - identity_bind_password
+            - authelia_session_secret
+            - authelia_storage_key
+            - authelia_reset_jwt_secret
+            - authelia_oidc_hmac_secret
+            - authelia_oidc_jwks_key
+          changed_when: true
+          no_log: true
+
+        - name: Clean up
+          ansible.builtin.file:
+            path: "{{ identity_restore_stage.stdout }}"
+            state: absent
+
+    - name: Start lldap and Authelia again
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        scope: user
+        state: started
+      become: true
+      become_user: "{{ identity_user }}"
+      environment: "{{ identity_podman_env }}"
+      loop: [lldap.service, authelia.service]
+      failed_when: false

@@ -1,0 +1,81 @@
+---
+# Identity stack, part 1: lldap, a lightweight LDAP directory (users, groups)
+# with a web UI. Part 2 is the `authelia` role (OpenID Connect on top of it).
+# Both run as rootless Podman containers (Quadlet) under ONE service user and
+# one Podman network, so Authelia reaches lldap by name without any host port.
+#
+# Variables named identity_* are shared with the authelia and homelab roles.
+
+identity_user: ldap
+
+# --- names ------------------------------------------------------------------
+# DNS domain of the stack. Apps and browsers use auth.<domain> and
+# ldap.<domain>. It must contain a dot and must not be a public suffix; Authelia
+# also refuses special-use names such as "localhost". "lab.internal" is
+# untested with Authelia; if it is refused, use a subdomain of a domain you
+# own (e.g. "lab.example.org"). The names need not exist in public DNS: this
+# role adds them to /etc/hosts here, and `identity-k3s-link` makes them resolve
+# inside k3s.
+identity_domain: lab.internal
+identity_ldap_host: "ldap.{{ identity_domain }}"
+identity_auth_host: "auth.{{ identity_domain }}"
+# LDAP base DN, derived from the domain (lab.internal -> dc=lab,dc=internal).
+identity_base_dn: "dc={{ identity_domain.split('.') | join(',dc=') }}"
+
+# --- where it listens ---------------------------------------------------------
+# LDAPS (lldap) and the OIDC issuer (Authelia) are published on this address so
+# that pods in k3s can reach them through the node. The lldap web UI is always
+# loopback only, and plain LDAP (3890) is never published.
+identity_bind_address: "0.0.0.0"
+# The address other machines/pods use to reach this host. Used for the k3s DNS
+# override and /etc/hosts-style entries. Change it when the stack moves.
+identity_host_address: "{{ ansible_facts['default_ipv4']['address'] | default('127.0.0.1') }}"
+# What this machine's /etc/hosts maps the two names to. Loopback while the
+# stack runs here; set it to the server's address once it runs elsewhere.
+identity_hosts_address: "127.0.0.1"
+identity_manage_hosts: true
+
+identity_ldaps_port: 6360
+identity_authelia_port: 9443
+ldap_web_port: 17170
+
+# firewalld: published ports are reachable from the LAN unless blocked (Fedora
+# Workstation's default zone allows 1025-65535). false = add reject rules for
+# the LDAPS and Authelia ports in the default zone. The k3s pod and service
+# networks are in firewalld's `trusted` zone by source (k3s role), so they are
+# not affected. Untested on a real machine.
+identity_lan_access: false
+identity_manage_firewalld: true
+
+# --- TLS ----------------------------------------------------------------------
+# mkcert: a certificate for the names below, issued by desktop_user's mkcert CA
+# (run `mkcert -install` once as that user first). files: use your own PEM
+# certificate and key (identity_tls_cert_src / identity_tls_key_src, paths on
+# the machine running Ansible) plus optionally the CA certificate.
+identity_tls_source: mkcert
+identity_tls_extra_names: []
+identity_tls_cert_src: ""
+identity_tls_key_src: ""
+identity_tls_ca_src: ""
+
+# --- lldap ---------------------------------------------------------------------
+# The "-rootless" variant runs as a non-root user inside the container. Pinned;
+# bump deliberately (lldap migrates its database forward).
+ldap_image: "docker.io/lldap/lldap:2026-09-22-alpine-rootless"
+ldap_admin_email: "admin@{{ identity_domain }}"
+
+# Groups to create in lldap. lldap's own groups (lldap_admin,
+# lldap_password_manager, lldap_strict_readonly) always exist. Create people in
+# the web UI (http://localhost:17170, user admin).
+identity_ldap_groups: []
+
+# The read-only account Authelia binds with. Created once, with a generated
+# password kept in /home/<identity_user>/identity/secrets/.
+identity_bind_user: authelia
+
+# --- files ---------------------------------------------------------------------
+identity_dir: "/home/{{ identity_user }}/identity"
+identity_secrets_dir: "{{ identity_dir }}/secrets"
+identity_tls_dir: "{{ identity_dir }}/tls"
+# Public copy of the CA certificate for your own user (used by identity-k3s-link).
+identity_user_share_dir: "/home/{{ desktop_user }}/.config/homelab/identity"

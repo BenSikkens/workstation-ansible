@@ -11,11 +11,16 @@ homelab up                  # start everything that is installed
 homelab down                # stop it all, plus any CI containers left behind
 homelab status              # running / degraded / stopped, per unit
 homelab up k3s              # only the k3s cluster
+homelab up identity         # only lldap + Authelia
 homelab down forgejo        # only Forgejo + runner (monitoring keeps running)
 homelab status monitoring   # only Grafana, Prometheus, Loki, Alloy, ...
+homelab gui                 # open the web dashboard (homelab_gui role)
 ```
 
-The optional scope is `forgejo`, `monitoring`, `k3s` or `all` (default).
+`homelab status [scope] --porcelain` prints the same information tab-separated
+(`G` group, `U` unit, `M` missing group lines); the dashboard reads it.
+
+The optional scope is `identity`, `forgejo`, `monitoring`, `k3s` or `all` (default). `ldap` is accepted as another name for `identity`.
 The command only appears in **new** shells; in an open terminal run
 `source ~/.bashrc.d/homelab.sh`. Tab completion is included.
 
@@ -36,6 +41,7 @@ service user names and the ports in the printed URLs) are written by Ansible.
 
 | Scope | Units |
 |---|---|
+| `identity` | `lldap`, `authelia` (user `ldap`); started in that order, stopped in reverse. Starts first and stops last, so the apps that sign in with it find it up |
 | `forgejo` | `forgejo`, `forgejo-runner` (user `git`); plus the Podman socket, Pushgateway and Podman exporter |
 | `monitoring` | `prometheus`, `loki`, `grafana` (user `monitoring`); `alloy.service` (system) |
 | `k3s` | `k3s.service` |
@@ -46,7 +52,7 @@ The exact list, with the verbs allowed for each, is in `roles/homelab/vars/main.
 
 `status` exits 0 when everything in scope is running, 1 when degraded and 3
 when stopped, so it is usable in scripts. A group counts as running when its
-core units are up (Forgejo + runner; Prometheus, Loki, Grafana and Alloy; k3s).
+core units are up (lldap + Authelia; Forgejo + runner; Prometheus, Loki, Grafana and Alloy; k3s).
 The Pushgateway and the Podman exporters are listed but do not make a group
 "degraded" on their own.
 

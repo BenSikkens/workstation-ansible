@@ -1,0 +1,13 @@
+# Managed by Ansible (roles/homelab_gui). Local edits are overwritten.
+# No NoNewPrivileges= here: the homelab command calls sudo.
+[Unit]
+Description=Homelab dashboard (127.0.0.1:{{ homelab_gui_port }})
+
+[Service]
+ExecStart=/usr/bin/python3 -I {{ homelab_gui_dir }}/server.py {{ homelab_gui_config_dir }}/config.json
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

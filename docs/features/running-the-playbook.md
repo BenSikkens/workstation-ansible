@@ -12,6 +12,7 @@ runs against the local machine (`ansible_connection=local`, `inventory.ini`).
 ├── requirements.yml      # external collections (community.general, ansible.posix)
 ├── site.yml              # main playbook: the list of roles = the list of software
 ├── forgejo-backup.yml    # restore or remove the pre-install Forgejo backup
+├── identity-backup.yml   # back up or restore lldap/Authelia
 ├── group_vars/all.yml    # settings you are expected to edit
 ├── examples/             # example roles that never run by themselves
 ├── docs/                 # this documentation
@@ -45,14 +46,16 @@ its own:
 
 | Role | Pulls in |
 |---|---|
-| `podman_desktop`, `obsidian` | `flatpak_setup` |
+| `podman_desktop`, `obsidian`, `dbeaver`, `postman` | `flatpak_setup` |
 | `homelab`, `k3s` | `bashrc_loader` |
+| `ldap` | `bashrc_loader`, `mkcert` |
+| `authelia` | `ldap` |
 
 `monitoring` adapts to what exists: the Pushgateway for CI scan results is only
 set up when Forgejo is installed, and the Podman exporter only covers users
 that exist. If you add Forgejo later, re-run `--tags monitoring`. Likewise,
 the [homelab sudo rules](homelab-sudo.md) only cover service users that exist,
-so run `--tags homelab` after installing Forgejo or monitoring.
+so run `--tags homelab` after installing Forgejo, monitoring or the identity stack.
 
 ## Settings
 
@@ -65,6 +68,7 @@ Shared settings live in `group_vars/all.yml`:
 | `forgejo_backup_enabled` | `true` | take a [backup](forgejo-backup.md) of an existing Forgejo before changing it |
 | `monitoring_enabled` | `true` | install the [monitoring](../roles/monitoring.md) stack |
 | `homelab_users` | (commented example) | who joins the [homelab group](homelab-sudo.md) |
+| `identity_domain`, `identity_ldap_groups`, `authelia_oidc_clients` | (commented example) | the [identity stack](identity-oidc-for-apps.md) |
 
 Per-role settings are in each role's `defaults/main.yml`; they are listed on
 the role's page. A value in `group_vars/all.yml` wins over a role default.

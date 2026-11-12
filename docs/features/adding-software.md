@@ -14,6 +14,12 @@
 5. Document it in `docs/roles/<name>.md` and add a row to the index in
    `docs/README.md`.
 
+## Signing users in with the identity stack
+
+An app that runs in k3s adds an entry to `authelia_oidc_clients` and gets an
+OpenID Connect login backed by lldap; see
+[identity for your apps](identity-oidc-for-apps.md).
+
 ## Hooking an application into monitoring
 
 A role that runs a service can register it with Grafana / Prometheus / Loki by

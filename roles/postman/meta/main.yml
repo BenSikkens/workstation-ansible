@@ -1,0 +1,5 @@
+---
+# Needs the Flathub remote that flatpak_setup configures. Declared here so
+# `ansible-playbook site.yml --tags <this role>` works on its own.
+dependencies:
+  - role: flatpak_setup

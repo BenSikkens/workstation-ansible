@@ -1,0 +1,9 @@
+---
+# DBeaver Community has no Fedora RPM; installed from Flathub like obsidian and
+# podman_desktop (flatpak_setup provides the Flathub remote).
+
+- name: Install DBeaver Community (flatpak)
+  community.general.flatpak:
+    name: io.dbeaver.DBeaverCommunity
+    state: present
+    method: system

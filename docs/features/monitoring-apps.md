@@ -187,6 +187,7 @@ in `group_vars/all.yml` with a free port (`git` uses 9882, the desktop user 9883
 ```yaml
 monitoring_podman_exporters_extra:
   - {user: nextcloud, port: 9884}
+  - {user: ldap, port: 9885}      # the identity stack (lldap, Authelia)
 ```
 
 then run `ansible-playbook site.yml --tags monitoring --ask-become-pass`. Users

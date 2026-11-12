@@ -1,0 +1,4 @@
+---
+# Needs the identity user, network, certificate and lldap from the ldap role.
+dependencies:
+  - role: ldap

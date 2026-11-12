@@ -1,0 +1,79 @@
+# Managed by Ansible (roles/authelia). Local edits are overwritten on the next run.
+# Secrets are NOT in this file: they come from Podman secrets (see authelia.container).
+# Reference: https://www.authelia.com/configuration/
+theme: auto
+
+log:
+  level: {{ authelia_log_level }}
+
+server:
+  address: 'tcp://:9091/'
+  tls:
+    certificate: /certs/tls.crt
+    key: /certs/tls.key
+
+# Users and groups come from lldap, over the internal identity network. The
+# bind account is read-only; passwords are changed in lldap's web UI.
+authentication_backend:
+  password_reset:
+    disable: true
+  ldap:
+    implementation: lldap
+    address: 'ldap://lldap:3890'
+    base_dn: {{ identity_base_dn | to_json }}
+    user: {{ ('uid=' ~ identity_bind_user ~ ',ou=people,' ~ identity_base_dn) | to_json }}
+
+session:
+  cookies:
+    - name: authelia_session
+      domain: {{ identity_domain | to_json }}
+      authelia_url: {{ ('https://' ~ identity_auth_host ~ ':' ~ identity_authelia_port) | to_json }}
+
+storage:
+  local:
+    path: /data/db.sqlite3
+
+notifier:
+  filesystem:
+    filename: /data/notification.txt
+
+# Apps are protected by OpenID Connect, not by forwarding requests through
+# Authelia, so nothing is allowed here. (Authelia only accepts default_policy
+# 'deny' when at least one rule exists, hence the explicit deny rule.)
+access_control:
+  default_policy: deny
+  rules:
+    - domain:
+        - {{ identity_domain | to_json }}
+        - {{ ('*.' ~ identity_domain) | to_json }}
+      policy: deny
+{% if authelia_oidc_clients | length > 0 %}
+
+identity_providers:
+  oidc:
+    jwks:
+      - key_id: homelab
+        algorithm: RS256
+        use: sig
+        key: {% raw %}{{ secret "/run/secrets/authelia_oidc_jwks_key" | mindent 10 "|" | msquote }}{% endraw %}
+
+    clients:
+{% for c in authelia_oidc_clients %}
+{% set public = c.public | default(false) | bool %}
+      - client_id: {{ c.id | to_json }}
+        client_name: {{ (c.name | default(c.id)) | to_json }}
+        public: {{ 'true' if public else 'false' }}
+{% if public %}
+        token_endpoint_auth_method: none
+{% else %}
+        client_secret: {{ authelia_client_digests[c.id] | to_json }}
+{% endif %}
+        authorization_policy: {{ (c.policy | default(authelia_oidc_default_policy)) | to_json }}
+        redirect_uris: {{ c.redirect_uris | to_json }}
+        scopes: {{ (c.scopes | default(['openid', 'profile', 'email', 'groups'])) | to_json }}
+        grant_types: {{ (['authorization_code'] + (['refresh_token'] if 'offline_access' in (c.scopes | default([])) else [])) | to_json }}
+        response_types: ['code']
+        require_pkce: {{ 'true' if (c.require_pkce | default(true) | bool) else 'false' }}
+        pkce_challenge_method: S256
+{% endfor %}
+{% endif %}

@@ -1,0 +1,13 @@
+---
+# JupyterLab for desktop_user only (not system-wide), installed with pipx into
+# its own isolated environment. See docs/roles/jupyter.md.
+
+# The pipx package that provides `jupyter lab`.
+jupyter_package: jupyterlab
+
+# Extra packages to put INTO JupyterLab's environment (pipx inject), e.g.
+# extensions or kernels that must live next to it:
+#   jupyter_extra_packages: [jupyterlab-lsp, python-lsp-server]
+# Project libraries (pandas, numpy, ...) do NOT belong here: give each project its
+# own venv and register it as a kernel (see the docs page).
+jupyter_extra_packages: []
